@@ -1,0 +1,6 @@
+# NIGDY nie wrzucaj do repozytorium: hasła, baza i faktury
+.env
+data/
+pdf/
+__pycache__/
+*.pyc

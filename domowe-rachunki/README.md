@@ -14,6 +14,21 @@ i wyliczaniem miesięcznej kwoty do odkładania. Konektor wodociągów pobiera P
 
 Panel nie ma logowania. Trzymaj go tylko w sieci domowej lub za reverse proxy z autoryzacją.
 
+## Automatyczne wdrażanie z GitHuba
+
+Na hoście Dockera trzymaj repozytorium jako klon (repozytorium jest publiczne, więc `git clone`
+i `git pull` nie wymagają logowania):
+
+    git clone https://github.com/RiderXT/Rachunki.git ~/Rachunki
+    cd ~/Rachunki/domowe-rachunki
+    cp /ścieżka/do/starego/.env .env          # .env i data/ są poza repozytorium (.gitignore)
+    docker compose up -d --build
+
+`deploy.sh` sprawdza, czy na GitHubie są nowe commity, i tylko wtedy robi `git pull` oraz
+`docker compose up -d --build`. Wpis w cronie (`crontab -e`):
+
+    */5 * * * * /home/USER/Rachunki/domowe-rachunki/deploy.sh >> /home/USER/deploy.log 2>&1
+
 ## Strojenie parsera faktur z wodociągów
 
 Wzorce w `app/water_mail.py` są ogólne, bo układ Twojej faktury nie był znany.

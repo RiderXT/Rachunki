@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
 
   water-sync:
+    build: .
     image: domowe-rachunki:latest
     command: python -m app.water_mail --loop
     env_file: .env
