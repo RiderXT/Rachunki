@@ -56,6 +56,14 @@ mają pliku (np. wpisane ręcznie), możesz uzupełnić, dołączając PDF w tej
 Faktury zawierają dane osobowe i numer konta, więc ustaw `APP_PASSWORD` w `.env` (puste = bez hasła)
 albo trzymaj panel wyłącznie w sieci domowej.
 
+## PGNiG (w przygotowaniu)
+
+Konektor korzysta z nieoficjalnego API eBOK, tego samego co aplikacja. Na razie jest tylko diagnostyka,
+która robi jedno logowanie i wypisuje strukturę odpowiedzi z zamaskowanymi danymi osobowymi:
+
+    # w .env: PGNIG_LOGIN=... i PGNIG_PASSWORD=...
+    docker compose run --rm water-sync python -m app.pgnig --probe
+
 ## Po zmianie parsera
 
     docker compose run --rm water-sync python -m app.water_mail --reparse       # ponownie sparsuj zapisane PDF-y
