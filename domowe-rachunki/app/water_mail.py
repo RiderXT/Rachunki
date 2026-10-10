@@ -4,6 +4,8 @@ Uruchomienie:
   python -m app.water_mail            # jednorazowo
   python -m app.water_mail --loop     # w pętli co SYNC_INTERVAL_HOURS
   python -m app.water_mail --dump plik.pdf   # pokaż tekst z PDF-a i co parser z niego wyciągnął
+  python -m app.water_mail --reparse         # ponownie sparsuj zapisane PDF-y (po zmianie wzorców)
+  python -m app.water_mail --reset --yes     # usuń faktury z maila i pobierz od nowa
   python -m app.water_mail --inspect URL     # pokaż linki i pola na stronie pośredniej z linku w mailu
 """
 import email
@@ -32,16 +34,20 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 DATE = r"(\d{2}[.\-/]\d{2}[.\-/]\d{4})"
 AMOUNT = r"(\d[\d\s\u00a0]*[,.]\d{2})"
 # Kolejność ma znaczenie: pierwszy pasujący wzorzec wygrywa ("do zapłaty" ważniejsze niż "razem brutto")
+RE_AMOUNT_ZL_GR = re.compile(r"do\s+zap[łl]aty:?\s*(\d[\d\s\u00a0]*?)\s*z[łl]\s*(\d{2})\s*gr", re.I)  # "361 zł 82 gr"
 RE_AMOUNTS = [re.compile(w + r"[^\d]{0,40}" + AMOUNT, re.I) for w in (
     r"do\s+zap[łl]aty",
     r"warto[śs][ćc]\s+brutto",
     r"razem\s+brutto",
 )]
-RE_PERIOD = re.compile(
-    r"okres[^\d]{0,40}" + DATE + r"\s*(?:-|–|—|do)\s*" + DATE, re.I)
+# Okres zużycia: "Okres: 12.08.2026...10.09.2026". Opłaty abonamentowe mają skrót "Okres: 1...30.09.2026".
+RE_USAGE_PERIOD = re.compile(r"okres:?\s*" + DATE + r"\s*(?:\.{2,3}|…|-|–|—|do)\s*" + DATE, re.I)
+RE_SUBSCR_PERIOD = re.compile(r"okres:?\s*(\d{1,2})\s*\.{2,3}\s*(\d{2})[.\-/](\d{2})[.\-/](\d{4})", re.I)
 RE_ISSUE = re.compile(r"data\s+wystawienia[^\d]{0,20}" + DATE, re.I)
-RE_INVOICE = re.compile(r"faktura\s*(?:vat\s*)?nr[:.\s]*([A-Za-z0-9/\-_.]+)", re.I)
-RE_CONSUMPTION = re.compile(r"zu[żz]ycie[^\d]{0,40}(\d[\d\s\u00a0]*(?:[,.]\d+)?)\s*m\s*[3³]", re.I)
+RE_INVOICE_NO = re.compile(r"\b([A-Z]{1,4}/\d{4}/\d{3,})\b")          # np. R/2026/063407
+RE_INVOICE_NR = re.compile(r"faktura\s*(?:vat\s*)?nr[:.\s]*([A-Za-z0-9/\-_.]+)", re.I)
+RE_ITEM_TITLE = re.compile(r"^(woda|[śs]cieki|op[łl]ata)\b", re.I)
+RE_ITEM_QTY = re.compile(r"(?<![\d,.])(\d+(?:[,.]\d+)?)\s*m\s*[3³]\b", re.I)  # bez spacji w liczbie: "1 7,46m3" -> 7,46
 
 
 def _num(s):
@@ -53,20 +59,44 @@ def _iso(s):
     return f"{y}-{m}-{d}"
 
 
+def _water_consumption(text):
+    """Suma ilości (m3) z pozycji 'Woda ...'. Pozycje 'Ścieki' są pomijane (liczą tę samą wodę drugi raz)."""
+    total, found, current = 0.0, False, None
+    for line in text.splitlines():
+        if RE_ITEM_TITLE.match(line.strip()) and " - " in line:
+            current = line.strip().lower()
+            continue
+        if current and current.startswith("woda"):
+            if m := RE_ITEM_QTY.search(line):
+                total += _num(m.group(1))
+                found = True
+                current = None
+    return round(total, 2) if found else None
+
+
 def parse_text(text):
     out = {}
-    for rx in RE_AMOUNTS:
-        if m := rx.search(text):
-            out["amount_gross"] = _num(m.group(1))
-            break
-    if m := RE_PERIOD.search(text):
-        out["period_start"], out["period_end"] = _iso(m.group(1)), _iso(m.group(2))
+    if m := RE_AMOUNT_ZL_GR.search(text):
+        out["amount_gross"] = float(f"{_num(m.group(1)):.0f}.{m.group(2)}")
+    else:
+        for rx in RE_AMOUNTS:
+            if m := rx.search(text):
+                out["amount_gross"] = _num(m.group(1))
+                break
+    # okres rozliczeniowy: najwcześniejszy początek i najpóźniejszy koniec pozycji zużycia
+    ranges = [(_iso(a), _iso(b)) for a, b in RE_USAGE_PERIOD.findall(text)]
+    if not ranges:  # tylko abonament -> od podanego dnia do końca podanego miesiąca
+        ranges = [(f"{y}-{mo}-{int(sd):02d}", f"{y}-{mo}-{ed}")
+                  for sd, ed, mo, y in RE_SUBSCR_PERIOD.findall(text)]
+    if ranges:
+        out["period_start"] = min(r[0] for r in ranges)
+        out["period_end"] = max(r[1] for r in ranges)
     if m := RE_ISSUE.search(text):
         out["issue_date"] = _iso(m.group(1))
-    if m := RE_INVOICE.search(text):
+    if m := RE_INVOICE_NO.search(text) or RE_INVOICE_NR.search(text):
         out["invoice_no"] = m.group(1).rstrip(".")
-    if m := RE_CONSUMPTION.search(text):
-        out["consumption"], out["unit"] = _num(m.group(1)), "m3"
+    if (cons := _water_consumption(text)) is not None:
+        out["consumption"], out["unit"] = cons, "m3"
     return out
 
 
@@ -147,9 +177,9 @@ def download_pdf(url):
     if _is_pdf(r):
         return r.content
 
+    s.headers["Referer"] = r.url
     page = parse_page(r.text)
     text_rx = re.compile(os.environ.get("WATER_DOWNLOAD_TEXT", r"pobierz"), re.I)
-    href_rx = re.compile(r"download|\.pdf|getfile|attachment|DownloadDocument", re.I)
     hidden = {i["name"]: i.get("value", "") for i in page.inputs
               if i.get("name") and i.get("type", "").lower() == "hidden"}
     form_url = urljoin(r.url, page.form_action) if page.form_action else r.url
@@ -161,12 +191,14 @@ def download_pdf(url):
             resp = fn()
             if resp.ok and _is_pdf(resp):
                 return resp.content
+            log.warning("próba %s: status %s, Content-Type %s (to nie PDF)",
+                        label, resp.status_code, resp.headers.get("Content-Type"))
         except Exception as e:  # noqa: BLE001
             log.debug("próba %s: %s", label, e)
         return None
 
     for a in page.anchors:
-        if not (text_rx.search(a["text"]) or href_rx.search(a["href"])):
+        if not text_rx.search(a["text"]):  # tylko po tekście; linki do instrukcji .pdf ignorujemy
             continue
         href = a["href"].strip()
         if href.lower().startswith("javascript:"):
@@ -182,9 +214,14 @@ def download_pdf(url):
     for i in page.inputs:
         if i.get("type", "").lower() in ("submit", "image", "button") and i.get("name") \
                 and text_rx.search(i.get("value", "") + i.get("alt", "")):
-            data = {**hidden, i["name"]: i.get("value", "")}
-            if got := attempt(f"submit {i['name']}", lambda d=data: s.post(form_url, data=d, timeout=30)):
-                return got
+            variants = [
+                {**hidden, i["name"]: i.get("value", "")},                      # klik przycisku
+                {**hidden, "__EVENTTARGET": i["name"], "__EVENTARGUMENT": ""},  # __doPostBack z JS
+            ]
+            for n, data in enumerate(variants, 1):
+                if got := attempt(f"przycisk {i['name']} (wariant {n})",
+                                  lambda d=data: s.post(form_url, data=d, timeout=30)):
+                    return got
     raise ValueError(f"nie znalazłem PDF-a na stronie (próby: {tried or 'brak pasujących linków'}); "
                      "użyj --inspect <url>")
 
@@ -242,7 +279,9 @@ def process_mailbox():
 def handle_message(msg, mid, pdf_dir, link_regex):
     links = extract_links(msg, link_regex)
     if not links:
-        log.warning("Mail %s: brak linków pasujących do WATER_LINK_REGEX", mid)
+        log.warning("Mail %s: brak linków pasujących do WATER_LINK_REGEX (pomijam, to nie faktura?)", mid)
+        with db.conn() as c:
+            c.execute("INSERT OR IGNORE INTO processed_mail (message_id) VALUES (?)", [mid])
         return
     content, used = None, None
     for url in links:
@@ -266,10 +305,56 @@ def handle_message(msg, mid, pdf_dir, link_regex):
         c.execute("INSERT OR IGNORE INTO processed_mail (message_id) VALUES (?)", [mid])
 
 
+EDITABLE = ["provider", "utility", "invoice_no", "issue_date", "period_start", "period_end",
+            "amount_gross", "consumption", "unit"]
+
+
+def reparse():
+    """Ponownie parsuje zapisane PDF-y (po poprawie wzorców) i uzupełnia pola faktur z maila."""
+    with db.conn() as c:
+        rows = c.execute("SELECT id, pdf_path FROM bills WHERE source='mail-woda' "
+                         "AND pdf_path IS NOT NULL").fetchall()
+    for r in rows:
+        try:
+            fields = parse_text(pdf_text(r["pdf_path"]))
+            with db.conn() as c:
+                cur = c.execute("SELECT * FROM bills WHERE id=?", [r["id"]]).fetchone()
+            merged = {k: cur[k] for k in EDITABLE}
+            merged.update(fields)
+            db.update_bill(r["id"], **merged)
+            log.info("ID %s: %s", r["id"], fields)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ID %s: %s", r["id"], e)
+
+
+def reset_water():
+    """Usuwa faktury pobrane z maila (i ich PDF-y) oraz historię przetworzonych maili."""
+    with db.conn() as c:
+        paths = [r["pdf_path"] for r in c.execute(
+            "SELECT pdf_path FROM bills WHERE source='mail-woda' AND pdf_path IS NOT NULL")]
+        n_bills = c.execute("DELETE FROM bills WHERE source='mail-woda'").rowcount
+        n_mail = c.execute("DELETE FROM processed_mail").rowcount
+    for p in set(paths):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    log.info("Usunięto faktur: %d, wpisów o mailach: %d, plików PDF: %d", n_bills, n_mail, len(set(paths)))
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     if "--inspect" in sys.argv:
         inspect_url(sys.argv[sys.argv.index("--inspect") + 1])
+        return
+    if "--reparse" in sys.argv:
+        reparse()
+        return
+    if "--reset" in sys.argv:
+        if "--yes" not in sys.argv:
+            print("To usuwa wszystkie faktury pobrane z maila. Dodaj --yes, żeby potwierdzić.")
+            return
+        reset_water()
         return
     if "--dump" in sys.argv:
         text = pdf_text(sys.argv[sys.argv.index("--dump") + 1])

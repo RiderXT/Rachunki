@@ -41,6 +41,11 @@ numer faktury, zużycie). Gdy czegoś brakuje, popraw regexy `RE_*` albo przyśl
 (zanonimizowany), a dopasuję je. Faktury z niepełnymi danymi dostają status `partial` i można
 je uzupełnić w zakładce „Lista”.
 
+## Po zmianie parsera
+
+    docker compose run --rm water-sync python -m app.water_mail --reparse       # ponownie sparsuj zapisane PDF-y
+    docker compose run --rm water-sync python -m app.water_mail --reset --yes   # usuń faktury z maila i pobierz od nowa
+
 ## Link z maila prowadzi do strony pośredniej
 
 Konektor sam wchodzi na stronę z linku, szuka „Pobierz dokument" (zwykły link, `__doPostBack`
