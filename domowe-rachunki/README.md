@@ -56,10 +56,17 @@ mają pliku (np. wpisane ręcznie), możesz uzupełnić, dołączając PDF w tej
 Faktury zawierają dane osobowe i numer konta, więc ustaw `APP_PASSWORD` w `.env` (puste = bez hasła)
 albo trzymaj panel wyłącznie w sieci domowej.
 
+## Wgraj PDF
+
+Zakładka „Wgraj PDF”: przeciągasz pobrane z eBOK pliki (Enea, PGNiG, wodociągi), program rozpoznaje
+dostawcę, odczytuje dane i zapisuje fakturę razem z plikiem. Wodociągi mają pełny parser (z podziałem
+dom/ogród). Gaz i prąd mają odczyt ogólny, dopasowywany do prawdziwych faktur. Duplikaty są pomijane.
+
 ## PGNiG (w przygotowaniu)
 
-Konektor korzysta z nieoficjalnego API eBOK, tego samego co aplikacja. Na razie jest tylko diagnostyka,
-która robi jedno logowanie i wypisuje strukturę odpowiedzi z zamaskowanymi danymi osobowymi:
+Stare API eBOK (api-version=3.0) nie obsługuje już logowania, a nowy eBOK wymaga hasła SMS, więc
+automatyczne pobieranie bez Twojego udziału nie jest możliwe. Dostępna jest diagnostyka (jedno logowanie,
+zamaskowane dane osobowe):
 
     # w .env: PGNIG_LOGIN=... i PGNIG_PASSWORD=...
     docker compose run --rm water-sync python -m app.pgnig --probe

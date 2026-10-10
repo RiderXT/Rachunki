@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from app import db, stats
+from app import db, invoices, stats
 from app.version import VERSION
 
 st.set_page_config(page_title="Rachunki domowe", layout="wide")
@@ -90,8 +90,8 @@ if not bills.empty:
                    "Uzupełnij je w zakładce „Lista”. Bez okresu kwota liczona jest "
                    "do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
-t_stats, t_water, t_files, t_add, t_csv, t_list = st.tabs(
-    ["Statystyki", "Woda", "Faktury PDF", "Dodaj fakturę", "Import CSV", "Lista"])
+t_stats, t_water, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
+    ["Statystyki", "Woda", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
 
 with t_stats:
     if bills.empty:
@@ -216,6 +216,21 @@ with t_files:
                         db.set_pdf(bid, target)
                         st.session_state["flash"] = "PDF dołączony do faktury."
                         st.rerun()
+
+with t_upload:
+    st.write("Przeciągnij pobrane z eBOK pliki PDF (Enea, PGNiG, wodociągi). Program rozpozna dostawcę, "
+             "odczyta dane i zapisze fakturę razem z plikiem. Czego nie odczyta, uzupełnisz w zakładce „Lista”.")
+    hint_names = {v: k for k, v in LABEL.items()}
+    hint = hint_names[st.selectbox("Medium, jeśli dostawca nie zostanie rozpoznany", list(hint_names))]
+    uploads = st.file_uploader("Pliki PDF", type="pdf", accept_multiple_files=True, key="pdf_batch")
+    if uploads and st.button("Przetwórz pliki", type="primary"):
+        st.session_state["upload_rows"] = [
+            invoices.ingest(f.getvalue(), f.name, hint, PDF_DIR) for f in uploads]
+        st.rerun()
+    if "upload_rows" in st.session_state:
+        st.subheader("Wynik")
+        st.dataframe(pd.DataFrame(st.session_state.pop("upload_rows")), hide_index=True)
+        st.caption("Zaktualizowane statystyki zobaczysz po przełączeniu zakładki lub odświeżeniu strony.")
 
 with t_add:
     with st.form("add"):
