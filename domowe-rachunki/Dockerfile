@@ -4,5 +4,8 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
+RUN date -u '+%Y-%m-%d %H:%M UTC' > /srv/build_time.txt
 EXPOSE 8501
 CMD ["streamlit", "run", "app/dashboard.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]

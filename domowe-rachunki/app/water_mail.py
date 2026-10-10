@@ -33,21 +33,27 @@ MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", 
 # prawdziwym PDF-ie (tryb --dump) i ewentualnie poprawić poniższe regexy.
 DATE = r"(\d{2}[.\-/]\d{2}[.\-/]\d{4})"
 AMOUNT = r"(\d[\d\s\u00a0]*[,.]\d{2})"
-# Kolejność ma znaczenie: pierwszy pasujący wzorzec wygrywa ("do zapłaty" ważniejsze niż "razem brutto")
+# Obsługiwane układy faktur ZGK: daty "16-09-2026" / "16.09.2026" oraz "2025-12-18".
+DATE_ANY = r"(\d{2}[.\-/]\d{2}[.\-/]\d{4}|\d{4}-\d{2}-\d{2})"
+AMOUNT = r"(\d[\d\s\u00a0]*[,.]\d{2})"
+
+# Kolejność ma znaczenie: pierwszy pasujący wzorzec wygrywa
 RE_AMOUNT_ZL_GR = re.compile(r"do\s+zap[łl]aty:?\s*(\d[\d\s\u00a0]*?)\s*z[łl]\s*(\d{2})\s*gr", re.I)  # "361 zł 82 gr"
 RE_AMOUNTS = [re.compile(w + r"[^\d]{0,40}" + AMOUNT, re.I) for w in (
     r"do\s+zap[łl]aty",
+    r"nale[żz]no[śs][ćc]:",          # starszy układ: "Należność: 170,76 PLN"
     r"warto[śs][ćc]\s+brutto",
     r"razem\s+brutto",
 )]
-# Okres zużycia: "Okres: 12.08.2026...10.09.2026". Opłaty abonamentowe mają skrót "Okres: 1...30.09.2026".
-RE_USAGE_PERIOD = re.compile(r"okres:?\s*" + DATE + r"\s*(?:\.{2,3}|…|-|–|—|do)\s*" + DATE, re.I)
-RE_SUBSCR_PERIOD = re.compile(r"okres:?\s*(\d{1,2})\s*\.{2,3}\s*(\d{2})[.\-/](\d{2})[.\-/](\d{4})", re.I)
-RE_ISSUE = re.compile(r"data\s+wystawienia[^\d]{0,20}" + DATE, re.I)
+# Okres zużycia: "Okres: 12.08.2026...10.09.2026" albo "Okres: 2025-11-13...2025-12-15".
+RE_USAGE_PERIOD = re.compile(
+    r"okres:?\s*" + DATE_ANY + r"\s*(?:\.{2,3}|…|-|–|—|do)\s*" + DATE_ANY, re.I)
+# Abonament ma skrót: "Okres: 1...30.09.2026" albo "Okres: 2025-12-01...31".
+RE_SUBSCR_DMY = re.compile(r"okres:?\s*(\d{1,2})\s*\.{2,3}\s*(\d{2})[.\-/](\d{2})[.\-/](\d{4})", re.I)
+RE_SUBSCR_ISO = re.compile(r"okres:?\s*(\d{4})-(\d{2})-(\d{2})\s*\.{2,3}\s*(\d{1,2})\b", re.I)
+RE_ISSUE = re.compile(r"data\s+wystawienia:?[^\d]{0,20}" + DATE_ANY, re.I)
 RE_INVOICE_NO = re.compile(r"\b([A-Z]{1,4}/\d{4}/\d{3,})\b")          # np. R/2026/063407
 RE_INVOICE_NR = re.compile(r"faktura\s*(?:vat\s*)?nr[:.\s]*([A-Za-z0-9/\-_.]+)", re.I)
-RE_ITEM_TITLE = re.compile(r"^(woda|[śs]cieki|op[łl]ata)\b", re.I)
-RE_ITEM_QTY = re.compile(r"(?<![\d,.])(\d+(?:[,.]\d+)?)\s*m\s*[3³]\b", re.I)  # bez spacji w liczbie: "1 7,46m3" -> 7,46
 
 
 def _num(s):
@@ -55,27 +61,36 @@ def _num(s):
 
 
 def _iso(s):
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
     d, m, y = re.split(r"[.\-/]", s)
     return f"{y}-{m}-{d}"
 
 
-def _water_consumption(text):
-    """Suma ilości (m3) z pozycji 'Woda ...'. Pozycje 'Ścieki' są pomijane (liczą tę samą wodę drugi raz)."""
-    total, found, current = 0.0, False, None
-    for line in text.splitlines():
-        if RE_ITEM_TITLE.match(line.strip()) and " - " in line:
-            current = line.strip().lower()
-            continue
-        if current and current.startswith("woda"):
-            if m := RE_ITEM_QTY.search(line):
-                total += _num(m.group(1))
-                found = True
-                current = None
-    return round(total, 2) if found else None
+def _sub_dmy(m):
+    sd, ed, mo, y = m.groups()
+    return f"{y}-{mo}-{int(sd):02d}", f"{y}-{mo}-{ed}"
+
+
+def _sub_iso(m):
+    y, mo, sd, ed = m.groups()
+    return f"{y}-{mo}-{sd}", f"{y}-{mo}-{int(ed):02d}"
+
+
+def find_period(text):
+    """Pierwszy okres z tekstu: najpierw zużycie (pełne daty), potem skrót abonamentowy."""
+    if r := RE_USAGE_PERIOD.search(text):
+        return _iso(r.group(1)), _iso(r.group(2))
+    if r := RE_SUBSCR_DMY.search(text):
+        return _sub_dmy(r)
+    if r := RE_SUBSCR_ISO.search(text):
+        return _sub_iso(r)
+    return None
 
 
 def parse_text(text):
     out = {}
+    items = parse_items(text)
     if m := RE_AMOUNT_ZL_GR.search(text):
         out["amount_gross"] = float(f"{_num(m.group(1)):.0f}.{m.group(2)}")
     else:
@@ -83,11 +98,13 @@ def parse_text(text):
             if m := rx.search(text):
                 out["amount_gross"] = _num(m.group(1))
                 break
+    if "amount_gross" not in out and items:  # ostatnia deska ratunku: suma pozycji
+        out["amount_gross"] = round(sum(i["amount_gross"] for i in items), 2)
     # okres rozliczeniowy: najwcześniejszy początek i najpóźniejszy koniec pozycji zużycia
     ranges = [(_iso(a), _iso(b)) for a, b in RE_USAGE_PERIOD.findall(text)]
     if not ranges:  # tylko abonament -> od podanego dnia do końca podanego miesiąca
-        ranges = [(f"{y}-{mo}-{int(sd):02d}", f"{y}-{mo}-{ed}")
-                  for sd, ed, mo, y in RE_SUBSCR_PERIOD.findall(text)]
+        ranges = [_sub_dmy(m) for m in RE_SUBSCR_DMY.finditer(text)] + \
+                 [_sub_iso(m) for m in RE_SUBSCR_ISO.finditer(text)]
     if ranges:
         out["period_start"] = min(r[0] for r in ranges)
         out["period_end"] = max(r[1] for r in ranges)
@@ -95,9 +112,64 @@ def parse_text(text):
         out["issue_date"] = _iso(m.group(1))
     if m := RE_INVOICE_NO.search(text) or RE_INVOICE_NR.search(text):
         out["invoice_no"] = m.group(1).rstrip(".")
-    if (cons := _water_consumption(text)) is not None:
-        out["consumption"], out["unit"] = cons, "m3"
+    water = [i["quantity"] for i in items if i["kind"] == "woda" and i["unit"] == "m3"]
+    if water:  # ścieki pomijamy: liczą tę samą wodę drugi raz
+        out["consumption"], out["unit"] = round(sum(water), 2), "m3"
     return out
+
+
+# Pozycje faktury: przypisanie do licznika po fragmentach tytułu i opisu licznika (małe litery),
+# sprawdzane po kolei. "/podlicznik" (a nie "podliczniki:") odróżnia podlicznik od linii
+# "Podliczniki: 45;" na fakturze licznika głównego. Dopasuj, jeśli wodociągi zmienią nazewnictwo.
+METER_RULES = [("/podlicznik", "ogrod"), ("pozostali odbiorcy", "ogrod"),
+               ("gospodarstw", "dom"), ("licznik:", "dom")]
+RE_ITEM_HEAD = re.compile(r"^(woda\s+-\s|[śs]cieki\s+-\s|op[łl]ata\s+abonamentowa\b)", re.I)
+RE_ITEM_LINE = re.compile(
+    r"(?<![\d,.])(\d+(?:[,.]\d+)?)\s*(m\s*[3³]|szt\.?|kpl\.?|mies\.?)\s+"
+    r"(\d[\d\s\u00a0]*[,.]\d{2})\s*PLN\s+(?:(\d[\d\s\u00a0]*[,.]\d{2})\s*PLN\s+)?"
+    r"(\d+)\s*%\s+(\d[\d\s\u00a0]*[,.]\d{2})", re.I)
+
+
+def _meter_for(title, body=""):
+    t = f"{title} {body}".lower()
+    for fragment, meter in METER_RULES:
+        if fragment in t:
+            return meter
+    return "inny"
+
+
+def parse_items(text):
+    """Pozycje faktury: licznik (dom/ogród), rodzaj (woda/ścieki/abonament), ilość, kwota brutto, okres."""
+    blocks, cur = [], None
+    for line in (l.strip() for l in text.splitlines()):
+        if RE_ITEM_HEAD.match(line):
+            cur = {"title": line, "lines": []}
+            blocks.append(cur)
+        elif re.match(r"^(suma:|stawka\s+vat)", line, re.I):
+            cur = None
+        elif cur is not None:
+            cur["lines"].append(line)
+    items = []
+    for b in blocks:
+        m = next((RE_ITEM_LINE.search(l) for l in b["lines"] if RE_ITEM_LINE.search(l)), None)
+        if not m:
+            continue
+        title = b["title"].lower()
+        kind = ("scieki" if re.match(r"[śs]cieki", title) else
+                "abonament" if re.match(r"op[łl]ata", title) else "woda")
+        body = "\n".join(b["lines"])
+        period = find_period(body)
+        items.append({"meter": _meter_for(b["title"], body), "kind": kind, "quantity": _num(m.group(1)),
+                      "unit": "m3" if re.match(r"m\s*[3³]", m.group(2), re.I) else "szt",
+                      "amount_gross": _num(m.group(6)),
+                      "period_start": period[0] if period else None,
+                      "period_end": period[1] if period else None})
+    return items
+
+
+def check_items(items, amount, label=""):
+    if items and amount is not None and abs(sum(i["amount_gross"] for i in items) - amount) > 0.05:
+        log.warning("%s suma pozycji %.2f != kwota faktury %.2f", label, sum(i["amount_gross"] for i in items), amount)
 
 
 def pdf_text(path_or_bytes):
@@ -276,6 +348,12 @@ def process_mailbox():
         imap.logout()
 
 
+def _pdf_name(invoice_no, content):
+    if invoice_no:
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", invoice_no) + ".pdf"   # R/2026/063407 -> R_2026_063407.pdf
+    return f"{datetime.now():%Y%m%d}_{hashlib.sha1(content).hexdigest()[:10]}.pdf"
+
+
 def handle_message(msg, mid, pdf_dir, link_regex):
     links = extract_links(msg, link_regex)
     if not links:
@@ -293,14 +371,17 @@ def handle_message(msg, mid, pdf_dir, link_regex):
     if content is None:
         return  # nie oznaczamy jako przetworzony -> kolejna próba przy następnym przebiegu
 
-    path = pdf_dir / f"{datetime.now():%Y%m%d}_{hashlib.sha1(content).hexdigest()[:10]}.pdf"
+    text = pdf_text(content)
+    fields = parse_text(text)
+    items = parse_items(text)
+    check_items(items, fields.get("amount_gross"), f"Mail {mid}:")
+    path = pdf_dir / _pdf_name(fields.get("invoice_no"), content)
     path.write_bytes(content)
-    fields = parse_text(pdf_text(content))
     fields.setdefault("issue_date", email.utils.parsedate_to_datetime(msg["Date"]).date().isoformat()
                       if msg["Date"] else None)
     created = db.add_bill(provider="Wodociągi", utility="woda", source="mail-woda",
-                          pdf_path=str(path), **fields)
-    log.info("Mail %s: %s %s", mid, "dodano" if created else "duplikat", fields)
+                          pdf_path=str(path), items=items, **fields)
+    log.info("Mail %s: %s %s (pozycji: %d)", mid, "dodano" if created else "duplikat", fields, len(items))
     with db.conn() as c:
         c.execute("INSERT OR IGNORE INTO processed_mail (message_id) VALUES (?)", [mid])
 
@@ -310,19 +391,31 @@ EDITABLE = ["provider", "utility", "invoice_no", "issue_date", "period_start", "
 
 
 def reparse():
-    """Ponownie parsuje zapisane PDF-y (po poprawie wzorców) i uzupełnia pola faktur z maila."""
+    """Ponownie parsuje zapisane PDF-y (po poprawie wzorców): uzupełnia pola, pozycje i nazywa pliki numerem faktury."""
     with db.conn() as c:
         rows = c.execute("SELECT id, pdf_path FROM bills WHERE source='mail-woda' "
                          "AND pdf_path IS NOT NULL").fetchall()
     for r in rows:
         try:
-            fields = parse_text(pdf_text(r["pdf_path"]))
+            with open(r["pdf_path"], "rb") as fh:
+                content = fh.read()
+            text = pdf_text(content)
+            fields, items = parse_text(text), parse_items(text)
             with db.conn() as c:
                 cur = c.execute("SELECT * FROM bills WHERE id=?", [r["id"]]).fetchone()
             merged = {k: cur[k] for k in EDITABLE}
             merged.update(fields)
             db.update_bill(r["id"], **merged)
-            log.info("ID %s: %s", r["id"], fields)
+            db.replace_items(r["id"], items)
+            check_items(items, merged["amount_gross"], f"ID {r['id']}:")
+            new_path = Path(r["pdf_path"]).with_name(_pdf_name(merged["invoice_no"], content))
+            if str(new_path) != r["pdf_path"] and not new_path.exists():
+                os.rename(r["pdf_path"], new_path)
+                with db.conn() as c:
+                    c.execute("UPDATE bills SET pdf_path=? WHERE id=?", [str(new_path), r["id"]])
+            log.info("ID %s: %s | pozycji: %d | %s", r["id"], merged["invoice_no"], len(items),
+                     "OK" if db.compute_status(merged) == "ok" else "NIEPEŁNE: " + ", ".join(
+                         k for k in ("amount_gross", "period_start", "period_end") if not merged[k]))
         except Exception as e:  # noqa: BLE001
             log.warning("ID %s: %s", r["id"], e)
 

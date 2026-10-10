@@ -41,6 +41,21 @@ numer faktury, zużycie). Gdy czegoś brakuje, popraw regexy `RE_*` albo przyśl
 (zanonimizowany), a dopasuję je. Faktury z niepełnymi danymi dostają status `partial` i można
 je uzupełnić w zakładce „Lista”.
 
+## Zakładka Woda
+
+Pokazuje zużycie i koszty osobno dla licznika głównego (dom) i podlicznika (ogród), dla ostatnich
+12 miesięcy albo wybranego roku, porównanie z tymi samymi miesiącami rok wcześniej oraz zmianę
+ceny za m³. Podział bierze się z pozycji faktury: tytuły zawierające „gospodarstw" to dom,
+„pozostali odbiorcy" to ogród (`METER_RULES` w `app/water_mail.py`). Faktury bez rozpoznanych
+pozycji są liczone w całości jako „bez podziału".
+
+## Faktury PDF
+
+Zakładka „Faktury PDF”: wybierasz medium, rok i fakturę, klikasz „Pobierz PDF”. Faktury, które nie
+mają pliku (np. wpisane ręcznie), możesz uzupełnić, dołączając PDF w tej samej zakładce.
+Faktury zawierają dane osobowe i numer konta, więc ustaw `APP_PASSWORD` w `.env` (puste = bez hasła)
+albo trzymaj panel wyłącznie w sieci domowej.
+
 ## Po zmianie parsera
 
     docker compose run --rm water-sync python -m app.water_mail --reparse       # ponownie sparsuj zapisane PDF-y

@@ -1,17 +1,26 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-}
     image: domowe-rachunki:latest
     ports:
       - "8501:8501"
     environment:
       DB_PATH: /data/rachunki.sqlite
+      PDF_DIR: /pdf
+      APP_PASSWORD: ${APP_PASSWORD:-}
     volumes:
       - ./data:/data
+      - ${PDF_HOST_DIR:-./pdf}:/pdf
     restart: unless-stopped
 
   water-sync:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-}
     image: domowe-rachunki:latest
     command: python -m app.water_mail --loop
     env_file: .env

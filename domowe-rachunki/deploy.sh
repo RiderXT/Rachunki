@@ -16,6 +16,7 @@ fi
 
 echo "$(date '+%F %T') nowe zmiany: ${LOCAL:0:7} -> ${REMOTE:0:7}"
 git pull --ff-only --quiet
+export GIT_SHA=$(git rev-parse --short HEAD)
 docker compose up -d --build
 docker image prune -f >/dev/null
 echo "$(date '+%F %T') wdrożono ${REMOTE:0:7}"
