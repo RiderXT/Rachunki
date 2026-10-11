@@ -65,6 +65,10 @@ with db.conn() as c:
     water_price = stats.water_price_series(c, bills)
 water_bills = bills[bills["utility"] == "woda"]
 water_done = stats.complete_months(water_bills) if not water_bills.empty else []
+gas_bills = bills[bills["utility"] == "gaz"]
+gas_done = stats.complete_months(gas_bills) if not gas_bills.empty else []
+gas_daily = stats.usage_daily(gas_bills, "gaz")
+gas_price = stats.unit_price_series(gas_bills, "gaz")
 
 sav = stats.suggested_savings(bills) if not bills.empty else None
 suggested = float(sav["per_month"].sum()) if sav is not None else 0.0
@@ -90,8 +94,8 @@ if not bills.empty:
                    "Uzupełnij je w zakładce „Lista”. Bez okresu kwota liczona jest "
                    "do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
-t_stats, t_water, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
-    ["Statystyki", "Woda", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
+t_stats, t_water, t_gas, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
+    ["Statystyki", "Woda", "Gaz", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
 
 with t_stats:
     if bills.empty:
@@ -125,52 +129,69 @@ with t_stats:
             st.subheader("Saldo skarbonki (wpłaty − faktury, narastająco)")
             st.line_chart(bal[["saldo"]])
 
-with t_water:
-    if water_bills.empty or not water_done:
-        st.info("Brak w pełni pokrytych miesięcy z fakturami za wodę. Pobierz faktury (konektor) "
-                "albo dodaj je ręcznie.")
+def usage_tab(daily, done, key, noun, unit, price, price_title, empty_msg):
+    """Wspólna zakładka zużycia i kosztów (woda, gaz): okres, podsumowanie, rok do roku, wykresy."""
+    if not done:
+        st.info(empty_msg)
+        return
+    years = sorted({m.year for m in done}, reverse=True)
+    choice = st.selectbox("Okres", ["Ostatnie 12 miesięcy"] + [f"Rok {y}" for y in years], key=f"period_{key}")
+    months = done[-12:] if choice.startswith("Ostatnie") else [m for m in done if m.year == int(choice.split()[1])]
+    totals, compare, n_common = stats.compare_table(daily, months, done)
+    name = lambda k: stats.METERS.get(k, "Razem" if k == "razem" else k)  # noqa: E731
+    dec = 1 if unit == "m³" else 0
+    st.caption(f"Pełne miesiące w okresie: {len(months)} ({months[0]} – {months[-1]}). "
+               "Zużycie i koszty są rozkładane na dni okresu rozliczeniowego z faktury.")
+
+    if "razem" in totals.index:
+        k1, k2, k3 = st.columns(3)
+        k1.metric(f"Zużycie {noun}", f"{totals.loc['razem', 'usage']:,.{dec}f} {unit}".replace(",", " "))
+        k2.metric("Koszt", fmt(totals.loc["razem", "cost"]))
+        k3.metric("Średnio / miesiąc", fmt(totals.loc["razem", "cost"] / len(months)))
+        tbl = totals.rename(index=name)
+        st.dataframe(pd.DataFrame({
+            f"Zużycie ({unit})": tbl["usage"].round(2), "Koszt (zł)": tbl["cost"].round(2),
+            f"Koszt na {unit} (zł)": tbl["price"].round(3 if unit == "kWh" else 2)}))
+        st.caption(f"Koszt na {unit} = koszt całkowity (razem z opłatami stałymi) podzielony przez zużycie.")
+
+    st.subheader("Rok do roku")
+    if compare.empty:
+        st.info("Za mało danych do porównania: potrzebne są te same miesiące z poprzedniego roku "
+                "(i ze szczegółowymi pozycjami faktur). Porównanie pojawi się samo, gdy dane się uzbierają.")
     else:
-        years = sorted({m.year for m in water_done}, reverse=True)
-        choice = st.selectbox("Okres", ["Ostatnie 12 miesięcy"] + [f"Rok {y}" for y in years])
-        months = water_done[-12:] if choice.startswith("Ostatnie") else \
-            [m for m in water_done if m.year == int(choice.split()[1])]
-        totals, compare, n_common = stats.water_table(water_daily, months, water_done)
-        name = lambda k: stats.METERS.get(k, "Razem" if k == "razem" else k)  # noqa: E731
-        st.caption(f"Pełne miesiące w okresie: {len(months)} ({months[0]} – {months[-1]}). "
-                   "Zużycie i koszty są rozkładane na dni okresu rozliczeniowego z faktury.")
+        st.caption(f"Porównanie na {n_common} wspólnych miesiącach (te same miesiące rok wcześniej).")
+        cmp_tbl = compare.rename(index=name)
+        st.dataframe(pd.DataFrame({
+            f"Zużycie ({unit})": cmp_tbl["usage"].round(2), f"rok wcześniej ({unit})": cmp_tbl["usage_prev"].round(2),
+            "zmiana zużycia (%)": cmp_tbl["usage_chg"].round(1),
+            "Koszt (zł)": cmp_tbl["cost"].round(2), "rok wcześniej (zł)": cmp_tbl["cost_prev"].round(2),
+            "zmiana kosztu (%)": cmp_tbl["cost_chg"].round(1)}))
 
-        if "razem" in totals.index:
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Zużycie wody", f"{totals.loc['razem', 'm3']:.1f} m³")
-            k2.metric("Koszt", fmt(totals.loc["razem", "cost"]))
-            k3.metric("Średnio / miesiąc", fmt(totals.loc["razem", "cost"] / len(months)))
-            tbl = totals.rename(index=name)
-            st.dataframe(pd.DataFrame({
-                "Zużycie (m³)": tbl["m3"].round(2), "Koszt (zł)": tbl["cost"].round(2),
-                "Koszt na m³ (zł)": tbl["price"].round(2)}))
-            st.caption("Koszt na m³ = koszt całkowity (razem z opłatami stałymi) podzielony przez zużycie.")
+    for value, title in (("usage", f"Zużycie miesięczne ({unit})"), ("cost", "Koszt miesięczny (zł)")):
+        monthly = stats.monthly_by_meter(daily, months, value)
+        if not monthly.empty:
+            st.subheader(title)
+            st.bar_chart(monthly.rename(columns=name))
+    overlay = stats.year_overlay(daily, done, "cost")
+    if overlay.shape[1] > 1:
+        st.subheader("Koszt miesiąc po miesiącu: porównanie lat (zł)")
+        st.line_chart(overlay)
+    if not price.empty:
+        st.subheader(price_title)
+        st.line_chart(price.rename(columns=name))
 
-        st.subheader("Rok do roku")
-        if compare.empty:
-            st.info("Za mało danych do porównania: potrzebne są te same miesiące z poprzedniego roku "
-                    "(i ze szczegółowymi pozycjami faktur). Porównanie pojawi się samo, gdy dane się uzbierają.")
-        else:
-            st.caption(f"Porównanie na {n_common} wspólnych miesiącach (te same miesiące rok wcześniej).")
-            cmp_tbl = compare.rename(index=name)
-            st.dataframe(pd.DataFrame({
-                "Zużycie (m³)": cmp_tbl["m3"].round(2), "rok wcześniej (m³)": cmp_tbl["m3_prev"].round(2),
-                "zmiana zużycia (%)": cmp_tbl["m3_chg"].round(1),
-                "Koszt (zł)": cmp_tbl["cost"].round(2), "rok wcześniej (zł)": cmp_tbl["cost_prev"].round(2),
-                "zmiana kosztu (%)": cmp_tbl["cost_chg"].round(1)}))
 
-        for value, title in (("m3", "Zużycie miesięczne (m³)"), ("cost", "Koszt miesięczny (zł)")):
-            monthly = stats.water_monthly(water_daily, months, value)
-            if not monthly.empty:
-                st.subheader(title)
-                st.bar_chart(monthly.rename(columns=name))
-        if not water_price.empty:
-            st.subheader("Cena za m³ na kolejnych fakturach (woda + ścieki, bez opłat stałych)")
-            st.line_chart(water_price.rename(columns=name))
+with t_water:
+    usage_tab(water_daily, water_done, "water", "wody", "m³", water_price,
+              "Cena za m³ na kolejnych fakturach (woda + ścieki, bez opłat stałych)",
+              "Brak w pełni pokrytych miesięcy z fakturami za wodę. Pobierz faktury (konektor) "
+              "albo dodaj je ręcznie.")
+
+with t_gas:
+    usage_tab(gas_daily, gas_done, "gas", "gazu", "kWh", gas_price,
+              "Koszt za kWh na kolejnych fakturach (z opłatami stałymi)",
+              "Brak w pełni pokrytych miesięcy z fakturami za gaz. Uruchom import z eBOK "
+              "(python -m app.pgnig --sync) albo wgraj faktury w zakładce „Wgraj PDF”.")
 
 with t_files:
     if bills.empty:

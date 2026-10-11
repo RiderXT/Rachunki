@@ -49,6 +49,13 @@ ceny za m³. Podział bierze się z pozycji faktury: tytuły zawierające „gos
 „pozostali odbiorcy" to ogród (`METER_RULES` w `app/water_mail.py`). Faktury bez rozpoznanych
 pozycji są liczone w całości jako „bez podziału".
 
+## Zakładka Gaz
+
+Działa tak jak „Woda”, ale dla jednego licznika: zużycie w kWh i koszty dla ostatnich 12 miesięcy albo
+wybranego roku, porównanie z tymi samymi miesiącami rok wcześniej, koszt na kWh na kolejnych fakturach
+oraz wykres kosztów miesiąc po miesiącu z nałożonymi latami (sezonowość). Dane pochodzą z importu eBOK
+(`python -m app.pgnig --sync`) lub z wgranych PDF-ów.
+
 ## Faktury PDF
 
 Zakładka „Faktury PDF”: wybierasz medium, rok i fakturę, klikasz „Pobierz PDF”. Faktury, które nie

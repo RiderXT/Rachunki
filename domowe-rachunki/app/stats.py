@@ -100,7 +100,8 @@ def savings_balance(df, contribution, start_month):
 # ----------------------------------------------------------------------------------
 # Woda: dom vs ogród, zużycie i koszty, porównanie rok do roku
 # ----------------------------------------------------------------------------------
-METERS = {"dom": "Dom", "ogrod": "Ogród", "inny": "Inne", "bez_podzialu": "Bez podziału (brak pozycji)"}
+METERS = {"dom": "Dom", "ogrod": "Ogród", "inny": "Inne", "bez_podzialu": "Bez podziału (brak pozycji)",
+          "gaz": "Gaz", "prad": "Prąd"}
 
 
 def complete_months(df):
@@ -137,17 +138,17 @@ def water_daily(conn, bills):
                 continue
             days = pd.date_range(p[0], p[1], freq="D")
             parts.append(pd.DataFrame({"date": days, "meter": meter, "kind": kind,
-                                       "cost": amount / len(days), "m3": m3 / len(days)}))
+                                       "cost": amount / len(days), "usage": m3 / len(days)}))
     if not parts:
-        return pd.DataFrame(columns=["date", "meter", "kind", "cost", "m3"])
+        return pd.DataFrame(columns=["date", "meter", "kind", "cost", "usage"])
     return pd.concat(parts, ignore_index=True)
 
 
 def water_by_meter(daily, months):
     if daily.empty or not months:
-        return pd.DataFrame(columns=["cost", "m3"])
+        return pd.DataFrame(columns=["cost", "usage"])
     d = daily[daily["date"].dt.to_period("M").isin(months)]
-    return d.groupby("meter")[["cost", "m3"]].sum()
+    return d.groupby("meter")[["cost", "usage"]].sum()
 
 
 def _with_total(t):
@@ -162,7 +163,7 @@ def water_table(daily, months, complete):
     """(podsumowanie okresu, porównanie z rokiem wcześniej na wspólnych miesiącach, liczba wspólnych miesięcy)."""
     totals = _with_total(water_by_meter(daily, months))
     if not totals.empty:
-        totals["price"] = totals["cost"] / totals["m3"].where(totals["m3"] > 0)
+        totals["price"] = totals["cost"] / totals["usage"].where(totals["usage"] > 0)
     done = set(complete)
     # miesiące ze starych faktur bez podziału na liczniki porównujemy tylko z takimi samymi
     nosplit = set(daily.loc[daily["meter"] == "bez_podzialu", "date"].dt.to_period("M"))
@@ -174,8 +175,8 @@ def water_table(daily, months, complete):
     idx = cur.index.union(prev.index, sort=False)
     cur, prev = cur.reindex(idx).fillna(0.0), prev.reindex(idx).fillna(0.0)
     cmp_ = pd.DataFrame({
-        "m3": cur["m3"], "m3_prev": prev["m3"],
-        "m3_chg": (cur["m3"] / prev["m3"].where(prev["m3"] > 0) - 1) * 100,
+        "usage": cur["usage"], "usage_prev": prev["usage"],
+        "usage_chg": (cur["usage"] / prev["usage"].where(prev["usage"] > 0) - 1) * 100,
         "cost": cur["cost"], "cost_prev": prev["cost"],
         "cost_chg": (cur["cost"] / prev["cost"].where(prev["cost"] > 0) - 1) * 100,
     })
@@ -183,7 +184,7 @@ def water_table(daily, months, complete):
 
 
 def water_monthly(daily, months, value):
-    """Tabela miesiąc x licznik (value: 'cost' lub 'm3') dla podanych miesięcy."""
+    """Tabela miesiąc x licznik (value: 'cost' lub 'usage') dla podanych miesięcy."""
     if daily.empty or not months:
         return pd.DataFrame()
     d = daily[daily["date"].dt.to_period("M").isin(months)].copy()
@@ -210,3 +211,48 @@ def water_price_series(conn, bills):
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).pivot_table(index="date", columns="meter", values="price").sort_index()
+
+
+# ----------------------------------------------------------------------------------
+# Media z jednym licznikiem (gaz, prąd): to samo co woda, ale zużycie z pola `consumption` faktury
+# ----------------------------------------------------------------------------------
+compare_table = water_table      # (podsumowanie okresu, porównanie rok do roku, liczba wspólnych miesięcy)
+monthly_by_meter = water_monthly
+
+
+def usage_daily(bills, utility):
+    """Dobowy koszt i zużycie faktur danego medium (okres faktury rozkładany równo na dni)."""
+    parts = []
+    for b in bills[bills["utility"] == utility].itertuples():
+        if pd.isna(b.amount_gross):
+            continue
+        p = _period(b.period_start, b.period_end, b.issue_date)
+        if p is None:
+            continue
+        days = pd.date_range(p[0], p[1], freq="D")
+        use = 0.0 if pd.isna(b.consumption) else b.consumption
+        parts.append(pd.DataFrame({"date": days, "meter": utility, "kind": "razem",
+                                   "cost": b.amount_gross / len(days), "usage": use / len(days)}))
+    if not parts:
+        return pd.DataFrame(columns=["date", "meter", "kind", "cost", "usage"])
+    return pd.concat(parts, ignore_index=True)
+
+
+def unit_price_series(bills, utility):
+    """Koszt całkowity faktury / zużycie (zł za jednostkę) na kolejnych fakturach."""
+    b = bills[(bills["utility"] == utility) & bills["amount_gross"].notna() & (bills["consumption"] > 0)].copy()
+    if b.empty:
+        return pd.DataFrame()
+    b["date"] = b["period_end"].fillna(b["issue_date"])
+    b[utility] = b["amount_gross"] / b["consumption"]
+    return b.set_index("date")[[utility]].sort_index()
+
+
+def year_overlay(daily, months, value):
+    """Tabela miesiąc (1-12) x rok, do porównania sezonowości rok do roku."""
+    if daily.empty or not months:
+        return pd.DataFrame()
+    d = daily[daily["date"].dt.to_period("M").isin(months)]
+    m = d.groupby(d["date"].dt.to_period("M"))[value].sum()
+    df = pd.DataFrame({"year": [p.year for p in m.index], "month": [p.month for p in m.index], "v": m.values})
+    return df.pivot(index="month", columns="year", values="v").sort_index().rename(columns=str)
