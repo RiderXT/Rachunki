@@ -62,6 +62,16 @@ miesięcy wystarczy), **z czego składa się rachunek** (abonament, paliwo, dyst
 faktur: `python -m app.pgnig --sync` pobiera brakujące PDF-y i uzupełnia pozycje oraz stan konta także
 w już zaimportowanych fakturach, a `--reparse` odczytuje ponownie zapisane PDF-y (po zmianie parsera).
 
+## Prąd: Enea (diagnostyka)
+
+Enea nie wysyła faktur mailem, a logowanie do eBOK może wymagać kodu SMS. Diagnostyka robi jedno logowanie
+tak jak przeglądarka i opisuje, co się dzieje (przekierowania, czy jest krok z kodem, jakie linki ma panel).
+Kodu SMS nie omija: jeśli jest wymagany, skrypt tylko to zgłosi. W `.env`: `ENEA_LOGIN` i `ENEA_PASSWORD`.
+
+    docker compose run --rm water-sync python -m app.enea --probe
+
+Do czasu automatyzacji faktury z Enei wgrywasz w zakładce „Wgraj PDF”.
+
 ## Faktury PDF
 
 Zakładka „Faktury PDF”: wybierasz medium, rok i fakturę, klikasz „Pobierz PDF”. Faktury, które nie
