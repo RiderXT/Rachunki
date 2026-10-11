@@ -141,3 +141,18 @@ def update_columns(bill_id, **cols):
         return
     with conn() as c:
         c.execute(f"UPDATE bills SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", [*cols.values(), bill_id])
+
+
+def fill_missing(bill_id, fields):
+    """Uzupełnia tylko puste pola istniejącej faktury (np. rekordu z maila) i przelicza jej status.
+    Zwraca listę uzupełnionych kolumn."""
+    skip = {"status", "source", "pdf_path"}
+    with conn() as c:
+        row = c.execute("SELECT * FROM bills WHERE id=?", [bill_id]).fetchone()
+        upd = {k: v for k, v in fields.items()
+               if k in FIELDS and k not in skip and v is not None and row[k] is None}
+        merged = {k: row[k] for k in FIELDS}
+        merged.update(upd)
+        upd["status"] = compute_status(merged)
+        c.execute(f"UPDATE bills SET {', '.join(f'{k}=?' for k in upd)} WHERE id=?", [*upd.values(), bill_id])
+    return [k for k in upd if k != "status"]

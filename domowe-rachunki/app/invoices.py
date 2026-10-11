@@ -45,6 +45,33 @@ def generic_fields(text):
     return out
 
 
+def same_file_exists(provider, data):
+    """Czy ten sam plik (po zawartości) jest już zapisany przy jakiejś fakturze tego dostawcy."""
+    digest = hashlib.sha1(data).hexdigest()
+    with db.conn() as c:
+        paths = [r["pdf_path"] for r in c.execute(
+            "SELECT pdf_path FROM bills WHERE provider=? AND pdf_path IS NOT NULL", [provider])]
+    for p in paths:
+        try:
+            if Path(p).is_file() and hashlib.sha1(Path(p).read_bytes()).hexdigest() == digest:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def find_existing(provider, invoice_no, text):
+    """Istniejąca faktura tego dostawcy: po numerze, a jeśli PDF zapisuje numer inaczej niż mail powiadomienia,
+    to rekord z maila czekający na PDF, którego numer występuje w tekście (przy kilku: ten, który jest pierwszy)."""
+    with db.conn() as c:
+        if invoice_no:  # PDF podaje własny numer: albo to znana faktura, albo nowa (nie zgadujemy po tekście)
+            return c.execute("SELECT * FROM bills WHERE provider=? AND invoice_no=?", [provider, invoice_no]).fetchone()
+        waiting = c.execute("SELECT * FROM bills WHERE provider=? AND invoice_no IS NOT NULL "
+                            "AND pdf_path IS NULL AND source LIKE 'mail-%'", [provider]).fetchall()
+    hits = [(text.find(r["invoice_no"]), r) for r in waiting if r["invoice_no"] in text]
+    return min(hits, key=lambda h: h[0])[1] if hits else None
+
+
 def ingest(data, filename, hint, pdf_dir):
     """Przetwarza jeden PDF. `hint` = medium (prad/gaz/woda), gdy dostawcy nie uda się rozpoznać."""
     row = {"Plik": filename, "Dostawca": "", "Numer": "", "Kwota": "", "Okres": "", "Wynik": ""}
@@ -64,27 +91,37 @@ def ingest(data, filename, hint, pdf_dir):
     else:
         fields, items = generic_fields(text), []
 
-    if not fields.get("invoice_no"):  # bez numeru nie ma klucza unikalności: sprawdź ten sam plik po skrócie treści
-        digest = hashlib.sha1(data).hexdigest()[:10]
-        with db.conn() as c:
-            if c.execute("SELECT 1 FROM bills WHERE pdf_path LIKE ?", [f"%{digest}.pdf"]).fetchone():
-                row["Wynik"] = "duplikat (ten sam plik już wgrano)"
-                return row
-    path = Path(pdf_dir) / utility / water._pdf_name(fields.get("invoice_no"), data)
+    if same_file_exists(provider, data):
+        row.update(Dostawca=provider, Numer=fields.get("invoice_no") or "", Wynik="duplikat (ten sam plik już wgrano)")
+        return row
+    existing = find_existing(provider, fields.get("invoice_no"), text)
+    if existing is not None:
+        number = existing["invoice_no"]
+        path = Path(pdf_dir) / utility / water._pdf_name(number, data)
+    else:
+        path = Path(pdf_dir) / utility / water._pdf_name(fields.get("invoice_no"), data)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    created = db.add_bill(provider=provider, utility=utility, source="upload",
-                          pdf_path=str(path), items=items, **fields)
-    if not created and fields.get("invoice_no"):  # duplikat: dołącz PDF, jeśli faktura go nie ma
+
+    if existing is not None:  # faktura już jest (np. z maila lub z poprzedniego importu): uzupełnij, nie dubluj
+        done = []
+        if not existing["pdf_path"]:
+            db.set_pdf(existing["id"], path)
+            done.append("PDF")
+        done += db.fill_missing(existing["id"], fields)
         with db.conn() as c:
-            r = c.execute("SELECT id, pdf_path FROM bills WHERE provider=? AND invoice_no=?",
-                          [provider, fields["invoice_no"]]).fetchone()
-            if r and not r["pdf_path"]:
-                c.execute("UPDATE bills SET pdf_path=? WHERE id=?", [str(path), r["id"]])
-                row["Wynik"] = "faktura już była, dołączono PDF"
-        if utility == "gaz" and r:
-            gas_pdf.apply(r["id"], text)  # uzupełnij pozycje kosztów i stan konta
-            row["Wynik"] = row["Wynik"] or "faktura już była, uzupełniono pozycje i stan konta"
+            has_items = c.execute("SELECT COUNT(*) FROM bill_items WHERE bill_id=?", [existing["id"]]).fetchone()[0]
+        if items and not has_items:
+            db.replace_items(existing["id"], items)
+            done.append("pozycje")
+        if utility == "gaz":
+            gas_pdf.apply(existing["id"], text)
+        fields = {**fields, "invoice_no": number}
+        row["Wynik"] = ("uzupełniono istniejącą fakturę: " + ", ".join(done)) if done else "duplikat (już w bazie)"
+        created = False
+    else:
+        created = db.add_bill(provider=provider, utility=utility, source="upload",
+                              pdf_path=str(path), items=items, **fields)
     row.update(Dostawca=provider, Numer=fields.get("invoice_no") or "",
                Kwota=f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else "",
                Okres=f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else "")

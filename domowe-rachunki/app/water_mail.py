@@ -460,6 +460,12 @@ def main():
             process_mailbox()
         except Exception:  # noqa: BLE001
             log.exception("Błąd synchronizacji")
+        if os.environ.get("ENEA_SENDER"):
+            try:
+                from app import enea_mail
+                enea_mail.process_mailbox()
+            except Exception:  # noqa: BLE001
+                log.exception("Błąd synchronizacji powiadomień Enea")
         if not loop:
             break
         time.sleep(hours * 3600)

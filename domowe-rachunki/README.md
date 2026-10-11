@@ -62,15 +62,46 @@ miesięcy wystarczy), **z czego składa się rachunek** (abonament, paliwo, dyst
 faktur: `python -m app.pgnig --sync` pobiera brakujące PDF-y i uzupełnia pozycje oraz stan konta także
 w już zaimportowanych fakturach, a `--reparse` odczytuje ponownie zapisane PDF-y (po zmianie parsera).
 
-## Prąd: Enea (diagnostyka)
+## Prąd: Enea
 
-Enea nie wysyła faktur mailem, a logowanie do eBOK może wymagać kodu SMS. Diagnostyka robi jedno logowanie
-tak jak przeglądarka i opisuje, co się dzieje (przekierowania, czy jest krok z kodem, jakie linki ma panel).
-Kodu SMS nie omija: jeśli jest wymagany, skrypt tylko to zgłosi. W `.env`: `ENEA_LOGIN` i `ENEA_PASSWORD`.
+Enea nie wysyła faktur mailem, a nowy eBOK nie ma już prostego formularza logowania (strona jest ładowana
+skryptem, a logowanie może wymagać kodu SMS), więc faktur nie pobiera się automatycznie. Zamiast tego:
 
-    docker compose run --rm water-sync python -m app.enea --probe
+1. **Powiadomienie mailowe** o nowej fakturze zakłada w aplikacji rekord (numer i data). Włączasz je przez
+   `ENEA_SENDER=powiadomienia@ebok.enea.pl` w `.env` (korzysta z `IMAP_*`; obsługuje je usługa `water-sync`).
+2. Rekord czeka na PDF (informacja w zakładce „Wgraj PDF”). Po wgraniu PDF dopasowuje się po numerze,
+   uzupełnia kwotę, okres i datę, a duplikatów nie tworzy.
 
-Do czasu automatyzacji faktury z Enei wgrywasz w zakładce „Wgraj PDF”.
+### Pobranie wielu PDF-ów naraz (np. historia)
+
+Zaloguj się do eBOK Enei w przeglądarce (z kodem SMS), wejdź na stronę faktur i rozwiń pełną listę. Otwórz
+konsolę przeglądarki (F12, zakładka Console; Chrome wymaga wpisania `allow pasting`), wklej poniższy
+skrypt i naciśnij Enter. Działa wyłącznie w Twojej przeglądarce, na Twojej sesji, i tylko zapisuje pliki
+na dysk. Potem przeciągnij je do zakładki „Wgraj PDF”.
+
+```js
+(async () => {
+  const links = [...document.querySelectorAll('[data-action="download-document-api"]')];
+  console.log('Znaleziono dokumentów:', links.length);
+  for (const el of links) {
+    const name = (el.textContent || el.dataset.documentId || 'faktura').trim().replace(/[^A-Za-z0-9_-]+/g, '_');
+    try {
+      const r = await fetch(el.dataset.url, {credentials: 'include'});
+      const type = r.headers.get('content-type') || '';
+      const blob = await r.blob();
+      if (!type.includes('pdf')) { console.warn(name, 'to nie PDF:', r.status, type, (await blob.text()).slice(0, 200)); continue; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name + '.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+      await new Promise(res => setTimeout(res, 700));
+    } catch (e) { console.warn(name, e); }
+  }
+  console.log('Gotowe');
+})();
+```
+
+Skrypt jest napisany na podstawie elementów strony faktur (`data-action="download-document-api"`), ale nie
+był testowany na prawdziwej stronie. Jeśli coś nie zadziała, komunikat w konsoli powie, co zwrócił serwer.
 
 ## Faktury PDF
 

@@ -91,8 +91,8 @@ if not bills.empty:
     n_partial = int((bills["status"] == "partial").sum())
     if n_partial:
         st.warning(f"{n_partial} faktur ma niepełne dane (brak okresu lub kwoty). "
-                   "Uzupełnij je w zakładce „Lista”. Bez okresu kwota liczona jest "
-                   "do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
+                   "Uzupełnij je w zakładce „Lista” albo wgraj PDF faktury w zakładce „Wgraj PDF”. "
+                   "Bez okresu kwota liczona jest do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
 t_stats, t_water, t_gas, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
     ["Statystyki", "Woda", "Gaz", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
@@ -298,6 +298,11 @@ with t_files:
 with t_upload:
     st.write("Przeciągnij pobrane z eBOK pliki PDF (Enea, PGNiG, wodociągi). Program rozpozna dostawcę, "
              "odczyta dane i zapisze fakturę razem z plikiem. Czego nie odczyta, uzupełnisz w zakładce „Lista”.")
+    waiting = bills[bills["pdf_path"].isna() & bills["source"].fillna("").str.startswith("mail-")]
+    if not waiting.empty:
+        st.info("Faktury z powiadomień mailowych, które czekają na PDF: " + ", ".join(
+            f"{r.invoice_no} ({r.issue_date:%Y-%m-%d})" if pd.notna(r.issue_date) else str(r.invoice_no)
+            for r in waiting.itertuples()) + ". Wgraj ich PDF-y poniżej: dopasują się po numerze.")
     hint_names = {v: k for k, v in LABEL.items()}
     hint = hint_names[st.selectbox("Medium, jeśli dostawca nie zostanie rozpoznany", list(hint_names))]
     uploads = st.file_uploader("Pliki PDF", type="pdf", accept_multiple_files=True, key="pdf_batch")
