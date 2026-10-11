@@ -62,14 +62,17 @@ Zakładka „Wgraj PDF”: przeciągasz pobrane z eBOK pliki (Enea, PGNiG, wodoc
 dostawcę, odczytuje dane i zapisuje fakturę razem z plikiem. Wodociągi mają pełny parser (z podziałem
 dom/ogród). Gaz i prąd mają odczyt ogólny, dopasowywany do prawdziwych faktur. Duplikaty są pomijane.
 
-## PGNiG (w przygotowaniu)
+## Gaz: PGNiG / myORLEN eBOK
 
-Stare API eBOK (api-version=3.0) nie obsługuje już logowania, a nowy eBOK wymaga hasła SMS, więc
-automatyczne pobieranie bez Twojego udziału nie jest możliwe. Dostępna jest diagnostyka (jedno logowanie,
-zamaskowane dane osobowe):
+Konektor loguje się do `ebok.myorlen.pl` (nieoficjalne API tego samego serwisu co przeglądarka), pobiera
+listę faktur (numer, data, kwota, okres, zużycie w kWh) i PDF-y. Noty (numery zaczynające się od `N`) są
+pomijane (`PGNIG_SKIP_PREFIXES`). W `.env`: `PGNIG_LOGIN` i `PGNIG_PASSWORD`. Kolejność uruchamiania:
 
-    # w .env: PGNIG_LOGIN=... i PGNIG_PASSWORD=...
-    docker compose run --rm water-sync python -m app.pgnig --probe
+    docker compose run --rm water-sync python -m app.pgnig --probe             # logowanie i struktura odpowiedzi
+    docker compose run --rm water-sync python -m app.pgnig --sync --dry-run    # co zostałoby zaimportowane
+    docker compose run --rm water-sync python -m app.pgnig --sync              # import faktur i PDF-ów
+
+Automatyczne pobieranie co dobę: dopisz `COMPOSE_PROFILES=pgnig` do `.env` i uruchom `./deploy.sh`.
 
 ## Po zmianie parsera
 

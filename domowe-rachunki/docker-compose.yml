@@ -34,3 +34,17 @@ services:
     depends_on:
       - web
     restart: unless-stopped
+
+  # Automatyczne pobieranie faktur za gaz (PGNiG / myORLEN). Włączane przez COMPOSE_PROFILES=pgnig w .env.
+  pgnig-sync:
+    image: domowe-rachunki:latest
+    command: python -m app.pgnig --loop
+    env_file: .env
+    environment:
+      DB_PATH: /data/rachunki.sqlite
+      PDF_DIR: /pdf
+    volumes:
+      - ./data:/data
+      - ${PDF_HOST_DIR:-./pdf}:/pdf
+    restart: unless-stopped
+    profiles: ["pgnig"]
