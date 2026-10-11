@@ -7,13 +7,13 @@ import hashlib
 import re
 from pathlib import Path
 
-from app import db
+from app import db, gas_pdf
 from app import water_mail as water
 
 DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi"}
 PROVIDERS = [  # (medium, dostawca, wzorzec rozpoznawczy w tekście faktury)
     ("woda", "Wodociągi", re.compile(r"Gospodarki Komunalnej|zgkszamotuly", re.I)),
-    ("gaz", "PGNiG", re.compile(r"PGNiG|Polskie G[óo]rnictwo Naftowe|ebok\.pgnig", re.I)),
+    ("gaz", "PGNiG", re.compile(r"PGNiG|Polskie G[óo]rnictwo Naftowe|ebok\.pgnig|myORLEN", re.I)),
     ("prad", "Enea", re.compile(r"\bEnea\b", re.I)),
 ]
 RE_PERIOD_GENERIC = re.compile(
@@ -59,6 +59,8 @@ def ingest(data, filename, hint, pdf_dir):
     utility, provider = detect(text) or (hint, DEFAULT_PROVIDER[hint])
     if utility == "woda":
         fields, items = water.parse_text(text), water.parse_items(text)
+    elif utility == "gaz":
+        fields, items = gas_pdf.parse_text(text), gas_pdf.parse_items(text)
     else:
         fields, items = generic_fields(text), []
 
@@ -80,6 +82,9 @@ def ingest(data, filename, hint, pdf_dir):
             if r and not r["pdf_path"]:
                 c.execute("UPDATE bills SET pdf_path=? WHERE id=?", [str(path), r["id"]])
                 row["Wynik"] = "faktura już była, dołączono PDF"
+        if utility == "gaz" and r:
+            gas_pdf.apply(r["id"], text)  # uzupełnij pozycje kosztów i stan konta
+            row["Wynik"] = row["Wynik"] or "faktura już była, uzupełniono pozycje i stan konta"
     row.update(Dostawca=provider, Numer=fields.get("invoice_no") or "",
                Kwota=f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else "",
                Okres=f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else "")

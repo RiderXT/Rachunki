@@ -256,3 +256,105 @@ def year_overlay(daily, months, value):
     m = d.groupby(d["date"].dt.to_period("M"))[value].sum()
     df = pd.DataFrame({"year": [p.year for p in m.index], "month": [p.month for p in m.index], "v": m.values})
     return df.pivot(index="month", columns="year", values="v").sort_index().rename(columns=str)
+
+
+# ----------------------------------------------------------------------------------
+# Gaz: stan konta u dostawcy, struktura kosztów, ceny jednostkowe, prognoza roczna
+# ----------------------------------------------------------------------------------
+GAS_KINDS = {"abonament": "Opłata abonamentowa", "paliwo": "Paliwo gazowe",
+             "dystr_stala": "Dystrybucyjna stała", "dystr_zmienna": "Dystrybucyjna zmienna",
+             "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
+GAS_FIXED = ("abonament", "dystr_stala")        # opłaty stałe (zł / miesiąc)
+GAS_VARIABLE = ("paliwo", "dystr_zmienna")      # opłaty zmienne (zł / kWh)
+
+
+def balance_history(bills, utility="gaz"):
+    """Stan konta u dostawcy po kolejnych fakturach (+ nadpłata, - zaległość)."""
+    b = bills[(bills["utility"] == utility) & bills["account_balance"].notna()]
+    if b.empty:
+        return pd.DataFrame(columns=["date", "invoice_no", "balance"])
+    out = b[["issue_date", "invoice_no", "account_balance"]].rename(
+        columns={"issue_date": "date", "account_balance": "balance"})
+    return out.sort_values("date").reset_index(drop=True)
+
+
+def item_daily(conn, bills, utility):
+    """Dobowy koszt brutto pozycji faktur danego medium, wg rodzaju. Faktury bez pozycji: jedna pozycja 'razem'."""
+    items = pd.read_sql_query("SELECT * FROM bill_items", conn)
+    for c in ("period_start", "period_end"):
+        items[c] = pd.to_datetime(items[c], errors="coerce")
+    by_bill = {k: g for k, g in items.groupby("bill_id")}
+    parts = []
+    for b in bills[bills["utility"] == utility].itertuples():
+        bp = _period(b.period_start, b.period_end, b.issue_date)
+        rows = []
+        if b.id in by_bill:
+            for it in by_bill[b.id].itertuples():
+                ok = not (pd.isna(it.period_start) or pd.isna(it.period_end)) and it.period_end >= it.period_start
+                rows.append((it.kind, it.amount_gross, (it.period_start, it.period_end) if ok else bp))
+        elif not pd.isna(b.amount_gross):
+            rows.append(("razem", b.amount_gross, bp))
+        for kind, amount, p in rows:
+            if p is None:
+                continue
+            days = pd.date_range(p[0], p[1], freq="D")
+            parts.append(pd.DataFrame({"date": days, "kind": kind, "cost": amount / len(days)}))
+    if not parts:
+        return pd.DataFrame(columns=["date", "kind", "cost"])
+    return pd.concat(parts, ignore_index=True)
+
+
+def cost_by_kind(daily_items, months):
+    """Koszt wg rodzaju opłaty w podanych miesiącach (zł i udział %)."""
+    if daily_items.empty or not months:
+        return pd.DataFrame(columns=["cost", "share"])
+    d = daily_items[daily_items["date"].dt.to_period("M").isin(months)]
+    t = d.groupby("kind")["cost"].sum().to_frame()
+    t["share"] = t["cost"] / t["cost"].sum() * 100 if t["cost"].sum() else 0.0
+    return t.sort_values("cost", ascending=False)
+
+
+def _gas_price_rows(conn, bills):
+    """Pozycje gazu z ceną jednostkową: data okresu, rodzaj, cena brutto (zł/kWh albo zł/mc)."""
+    items = pd.read_sql_query(
+        "SELECT bill_id, kind, unit, unit_price, vat_rate, period_start, period_end FROM bill_items "
+        "WHERE unit_price IS NOT NULL", conn)
+    if items.empty:
+        return items
+    for c in ("period_start", "period_end"):
+        items[c] = pd.to_datetime(items[c], errors="coerce")
+    items = items.merge(bills[["id", "utility", "issue_date"]], left_on="bill_id", right_on="id")
+    items = items[items["utility"] == "gaz"].copy()
+    items["date"] = items["period_end"].fillna(items["issue_date"])
+    items["price"] = items["unit_price"] * (1 + items["vat_rate"].fillna(0) / 100)
+    return items
+
+
+def gas_price_series(conn, bills):
+    """(ceny zmienne zł/kWh, opłaty stałe zł/mc) w czasie, brutto, per rodzaj opłaty."""
+    items = _gas_price_rows(conn, bills)
+    if items.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    def pivot(kinds):
+        x = items[items["kind"].isin(kinds)]
+        if x.empty:
+            return pd.DataFrame()
+        return x.pivot_table(index="date", columns="kind", values="price", aggfunc="mean").sort_index().rename(
+            columns=GAS_KINDS)
+    return pivot(GAS_VARIABLE), pivot(GAS_FIXED)
+
+
+def gas_forecast(conn, bills, annual_kwh):
+    """Roczny koszt przy aktualnych cenach: opłaty stałe x 12 + zużycie (kWh) x cena zmienna. None, gdy brak cen."""
+    items = _gas_price_rows(conn, bills)
+    if items.empty or not annual_kwh:
+        return None
+    latest = items.sort_values(["date", "bill_id"]).groupby("kind").tail(1).set_index("kind")["price"]
+    fixed = sum(latest.get(k, 0.0) for k in GAS_FIXED)
+    variable = sum(latest.get(k, 0.0) for k in GAS_VARIABLE)
+    if not fixed and not variable:
+        return None
+    annual = fixed * 12 + variable * annual_kwh
+    return {"fixed_month": fixed, "per_kwh": variable, "annual_kwh": annual_kwh,
+            "annual_cost": annual, "per_month": annual / 12}

@@ -3,6 +3,7 @@
   python -m app.pgnig --probe             # diagnostyka: logowanie + struktura odpowiedzi (dane osobowe zamaskowane)
   python -m app.pgnig --sync --dry-run    # pokaż, co zostałoby zaimportowane (nic nie zapisuje)
   python -m app.pgnig --sync              # zaimportuj faktury i pobierz PDF-y
+  python -m app.pgnig --reparse           # ponownie odczytaj zapisane PDF-y (pozycje kosztów, stan konta)
   python -m app.pgnig --loop              # sync co PGNIG_INTERVAL_HOURS (domyślnie 24)
 
 Dane logowania w .env: PGNIG_LOGIN (login do eBOK) i PGNIG_PASSWORD. Token działa ok. godziny; każdy
@@ -19,7 +20,8 @@ from pathlib import Path
 
 import requests
 
-from app import db
+from app import db, gas_pdf
+from app import water_mail
 
 log = logging.getLogger("pgnig")
 BASE = os.environ.get("PGNIG_BASE", "https://ebok.myorlen.pl")
@@ -115,6 +117,35 @@ class Client:
         return content
 
 
+def _pdf_text(path):
+    try:
+        return water_mail.pdf_text(path) if path and Path(path).is_file() else ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("nie udało się odczytać %s: %s", path, e)
+        return ""
+
+
+def _needs_details(bill_id):
+    with db.conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM bill_items WHERE bill_id=?", [bill_id]).fetchone()[0]
+        bal = conn.execute("SELECT account_balance FROM bills WHERE id=?", [bill_id]).fetchone()[0]
+    return n == 0 or bal is None
+
+
+def reparse():
+    """Ponownie odczytuje zapisane PDF-y faktur za gaz: pozycje kosztów i stan konta (bez logowania)."""
+    with db.conn() as conn:
+        rows = conn.execute("SELECT id, invoice_no, pdf_path, amount_gross FROM bills "
+                            "WHERE provider=? AND pdf_path IS NOT NULL ORDER BY issue_date", [PROVIDER]).fetchall()
+    for r in rows:
+        text = _pdf_text(r["pdf_path"])
+        if not text:
+            log.warning("%s: brak pliku PDF", r["invoice_no"])
+            continue
+        fields, items = gas_pdf.apply(r["id"], text)
+        log.info("%s | pozycji: %d | stan konta: %s", r["invoice_no"], len(items), fields.get("account_balance"))
+
+
 def _d(v):
     return v[:10] if isinstance(v, str) and len(v) >= 10 else None
 
@@ -162,17 +193,25 @@ def sync(dry_run=False):
                 pdf_path = str(path)
             except Exception as e:  # noqa: BLE001
                 log.warning("%s: nie pobrano PDF: %s", no, e)
+        text = _pdf_text(pdf_path)
+        fields, items = (gas_pdf.parse_text(text), gas_pdf.parse_items(text)) if text else ({}, [])
         if row is None:
             db.add_bill(provider=PROVIDER, utility=UTILITY, invoice_no=no, issue_date=_d(inv.get("Date")),
                         period_start=_d(inv.get("StartDate")), period_end=_d(inv.get("EndDate")),
                         amount_gross=float(inv["GrossAmount"]) if inv.get("GrossAmount") is not None else None,
                         consumption=inv.get("WearKWH"), unit="kWh" if inv.get("WearKWH") is not None else None,
-                        source="pgnig-api", pdf_path=pdf_path)
+                        source="pgnig-api", pdf_path=pdf_path, items=items,
+                        account_balance=fields.get("account_balance"))
             added += 1
-            log.info("dodano: %s", desc)
-        elif pdf_path and not row["pdf_path"]:
-            db.set_pdf(row["id"], pdf_path)
-            log.info("dołączono PDF: %s", no)
+            water_mail.check_items(items, inv.get("GrossAmount"), f"{no}:")
+            log.info("dodano: %s | pozycji: %d | stan konta: %s", desc, len(items), fields.get("account_balance"))
+        else:
+            if pdf_path and not row["pdf_path"]:
+                db.set_pdf(row["id"], pdf_path)
+                log.info("dołączono PDF: %s", no)
+            if text and _needs_details(row["id"]):  # istniejąca faktura bez pozycji / stanu konta
+                gas_pdf.apply(row["id"], text)
+                log.info("uzupełniono pozycje i stan konta: %s | pozycji: %d", no, len(items))
     log.info("Faktur na liście: %d, nowych: %d, pominięte (np. noty): %d", len(rows), added, skipped)
 
 
@@ -221,6 +260,8 @@ def main():
             except Exception:  # noqa: BLE001
                 log.exception("Błąd synchronizacji PGNiG")
             time.sleep(hours * 3600)
+    elif "--reparse" in sys.argv:
+        reparse()
     elif "--sync" in sys.argv:
         sync(dry_run="--dry-run" in sys.argv)
     else:

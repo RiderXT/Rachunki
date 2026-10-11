@@ -41,10 +41,25 @@ CREATE TABLE IF NOT EXISTS processed_mail (
 );
 """
 
-ITEM_FIELDS = ["meter", "kind", "quantity", "unit", "amount_gross", "period_start", "period_end"]
+ITEM_FIELDS = ["meter", "kind", "quantity", "unit", "amount_gross", "period_start", "period_end",
+               "unit_price", "amount_net", "vat_rate"]
 FIELDS = ["provider", "utility", "invoice_no", "issue_date", "period_start",
           "period_end", "amount_gross", "consumption", "unit", "status",
-          "source", "pdf_path"]
+          "source", "pdf_path", "account_balance"]
+
+
+NEW_COLUMNS = {  # kolumny dodane po pierwszym wydaniu: dopisywane do istniejących baz
+    "bills": [("account_balance", "REAL")],  # stan konta u dostawcy po rozliczeniu (+ nadpłata, - zaległość)
+    "bill_items": [("unit_price", "REAL"), ("amount_net", "REAL"), ("vat_rate", "REAL")],
+}
+
+
+def _migrate(c):
+    for table, cols in NEW_COLUMNS.items():
+        have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
 
 
 @contextmanager
@@ -54,6 +69,7 @@ def conn():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
     c.executescript(SCHEMA)
+    _migrate(c)
     try:
         yield c
         c.commit()
@@ -115,3 +131,13 @@ def delete_bill(bill_id):
 def set_pdf(bill_id, path):
     with conn() as c:
         c.execute("UPDATE bills SET pdf_path=? WHERE id=?", [str(path), bill_id])
+
+
+def update_columns(bill_id, **cols):
+    """Aktualizuje wybrane kolumny faktury bez przeliczania statusu (np. stan konta, ścieżka PDF)."""
+    allowed = {"account_balance", "pdf_path"}
+    cols = {k: v for k, v in cols.items() if k in allowed}
+    if not cols:
+        return
+    with conn() as c:
+        c.execute(f"UPDATE bills SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", [*cols.values(), bill_id])

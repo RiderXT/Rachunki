@@ -56,6 +56,12 @@ wybranego roku, porównanie z tymi samymi miesiącami rok wcześniej, koszt na k
 oraz wykres kosztów miesiąc po miesiącu z nałożonymi latami (sezonowość). Dane pochodzą z importu eBOK
 (`python -m app.pgnig --sync`) lub z wgranych PDF-ów.
 
+Zakładka „Gaz” pokazuje też **stan konta u dostawcy** (nadpłata lub zaległość z ostatniej faktury i na ile
+miesięcy wystarczy), **z czego składa się rachunek** (abonament, paliwo, dystrybucja stała i zmienna),
+**ceny jednostkowe w czasie** oraz **prognozę roczną** przy obecnych cenach. Te dane pochodzą z PDF-ów
+faktur: `python -m app.pgnig --sync` pobiera brakujące PDF-y i uzupełnia pozycje oraz stan konta także
+w już zaimportowanych fakturach, a `--reparse` odczytuje ponownie zapisane PDF-y (po zmianie parsera).
+
 ## Faktury PDF
 
 Zakładka „Faktury PDF”: wybierasz medium, rok i fakturę, klikasz „Pobierz PDF”. Faktury, które nie

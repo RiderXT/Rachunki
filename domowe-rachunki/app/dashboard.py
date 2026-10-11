@@ -116,6 +116,11 @@ with t_stats:
         st.caption("Średnia z maks. 12 ostatnich miesięcy w pełni pokrytych fakturami. "
                    "Faktury są rozkładane na dni swojego okresu rozliczeniowego.")
 
+        _hist = stats.balance_history(bills)
+        if not _hist.empty:
+            _last = _hist.iloc[-1]
+            st.metric("Stan konta u PGNiG" + (" (nadpłata)" if _last["balance"] >= 0 else " (zaległość)"),
+                      fmt2(abs(_last["balance"])), help=f"Wg faktury {_last['invoice_no']} z {_last['date']:%Y-%m-%d}.")
         monthly = stats.monthly_costs(bills)
         if not monthly.empty:
             st.subheader("Koszty miesięczne (zł)")
@@ -179,6 +184,7 @@ def usage_tab(daily, done, key, noun, unit, price, price_title, empty_msg):
     if not price.empty:
         st.subheader(price_title)
         st.line_chart(price.rename(columns=name))
+    return months
 
 
 with t_water:
@@ -188,10 +194,61 @@ with t_water:
               "albo dodaj je ręcznie.")
 
 with t_gas:
-    usage_tab(gas_daily, gas_done, "gas", "gazu", "kWh", gas_price,
-              "Koszt za kWh na kolejnych fakturach (z opłatami stałymi)",
-              "Brak w pełni pokrytych miesięcy z fakturami za gaz. Uruchom import z eBOK "
-              "(python -m app.pgnig --sync) albo wgraj faktury w zakładce „Wgraj PDF”.")
+    hist = stats.balance_history(bills)
+    if not hist.empty:
+        last = hist.iloc[-1]
+        st.subheader("Skarbonka u PGNiG")
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Nadpłata na koncie" if last["balance"] >= 0 else "Zaległość na koncie", fmt2(abs(last["balance"])))
+        b2.metric("Stan na dzień", f"{last['date']:%Y-%m-%d}")
+        gas_monthly = float(sav.loc[sav["utility"] == "gaz", "per_month"].iloc[0]) if sav is not None else 0.0
+        if last["balance"] > 0 and gas_monthly > 0:
+            b3.metric("Wystarczy na", f"{last['balance'] / gas_monthly:.1f} mies.",
+                      help="Przy średnim miesięcznym koszcie gazu z ostatnich 12 pełnych miesięcy.")
+        st.caption(f"Stan konta po rozliczeniu z faktury {last['invoice_no']}. "
+                   "Kolejne faktury są pokrywane z nadpłaty, jeśli ją masz.")
+        if len(hist) > 1:
+            st.line_chart(hist.set_index("date")[["balance"]].rename(columns={"balance": "Stan konta (zł)"}))
+
+    gas_months = usage_tab(gas_daily, gas_done, "gas", "gazu", "kWh", gas_price,
+                           "Koszt za kWh na kolejnych fakturach (z opłatami stałymi)",
+                           "Brak w pełni pokrytych miesięcy z fakturami za gaz. Uruchom import z eBOK "
+                           "(python -m app.pgnig --sync) albo wgraj faktury w zakładce „Wgraj PDF”.")
+    if gas_months:
+        with db.conn() as gc:
+            gas_items = stats.item_daily(gc, bills, "gaz")
+            prices_var, prices_fixed = stats.gas_price_series(gc, bills)
+            last12 = gas_daily[gas_daily["date"].dt.to_period("M").isin(gas_done[-12:])]
+            annual_kwh = float(last12["usage"].sum())
+            actual12 = float(last12["cost"].sum())
+            forecast = stats.gas_forecast(gc, bills, annual_kwh)
+        struct = stats.cost_by_kind(gas_items, gas_months)
+        if not struct.empty and (struct.index != "razem").any():
+            st.subheader("Z czego składa się rachunek")
+            show = struct.rename(index=lambda k: stats.GAS_KINDS.get(k, k))
+            st.dataframe(pd.DataFrame({"Koszt (zł)": show["cost"].round(2), "Udział (%)": show["share"].round(1)}))
+            fixed = float(struct.loc[struct.index.isin(stats.GAS_FIXED), "cost"].sum())
+            variable = float(struct.loc[struct.index.isin(stats.GAS_VARIABLE), "cost"].sum())
+            f1, f2 = st.columns(2)
+            f1.metric("Opłaty stałe (abonament + dystrybucja stała)", fmt(fixed))
+            f2.metric("Opłaty zależne od zużycia (paliwo + dystrybucja zmienna)", fmt(variable))
+            st.caption("Kwoty brutto, rozłożone na dni okresów rozliczeniowych poszczególnych pozycji.")
+        if not prices_var.empty:
+            st.subheader("Cena za kWh, brutto (zł)")
+            st.line_chart(prices_var)
+        if not prices_fixed.empty:
+            st.subheader("Opłaty stałe za miesiąc, brutto (zł)")
+            st.line_chart(prices_fixed)
+        if forecast:
+            st.subheader("Prognoza roczna przy obecnych cenach")
+            p1, p2, p3 = st.columns(3)
+            p1.metric("Opłaty stałe / miesiąc", fmt2(forecast["fixed_month"]))
+            p2.metric("Cena zmienna za kWh", f"{forecast['per_kwh']:.3f} zł".replace(".", ","))
+            p3.metric("Roczny koszt", fmt(forecast["annual_cost"]),
+                      delta=f"{forecast['annual_cost'] - actual12:+,.0f} zł vs ostatnie 12 mies.".replace(",", " "),
+                      delta_color="inverse")
+            st.caption(f"Zakłada zużycie jak w ostatnich 12 miesiącach ({annual_kwh:,.0f} kWh) i ceny z najnowszej "
+                       f"faktury, czyli około {fmt(forecast['per_month'])} miesięcznie.".replace(",", " "))
 
 with t_files:
     if bills.empty:
@@ -308,7 +365,7 @@ with t_list:
                 "SELECT * FROM bills ORDER BY COALESCE(period_end, issue_date) DESC, id DESC", c)
         edited = st.data_editor(
             raw, hide_index=True, key="editor",
-            disabled=["id", "status", "source", "pdf_path", "created_at"],
+            disabled=["id", "status", "source", "pdf_path", "created_at", "account_balance"],
             column_config={"utility": st.column_config.SelectboxColumn(
                 "utility", options=list(LABEL), required=True)})
         st.caption("Daty w formacie RRRR-MM-DD. Status przelicza się sam przy zapisie.")
