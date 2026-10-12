@@ -7,7 +7,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from app import db, gas_pdf
+from app import db, enea_pdf, gas_pdf
 from app import water_mail as water
 
 DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi"}
@@ -88,6 +88,8 @@ def ingest(data, filename, hint, pdf_dir):
         fields, items = water.parse_text(text), water.parse_items(text)
     elif utility == "gaz":
         fields, items = gas_pdf.parse_text(text), gas_pdf.parse_items(text)
+    elif utility == "prad" and re.search(r"\bEnea\b", text, re.I):
+        fields, items = enea_pdf.parse_text(text), enea_pdf.parse_items(text)
     else:
         fields, items = generic_fields(text), []
 
@@ -116,6 +118,8 @@ def ingest(data, filename, hint, pdf_dir):
             done.append("pozycje")
         if utility == "gaz":
             gas_pdf.apply(existing["id"], text)
+        elif utility == "prad" and re.search(r"\bEnea\b", text, re.I):
+            enea_pdf.apply(existing["id"], text)
         fields = {**fields, "invoice_no": number}
         row["Wynik"] = ("uzupełniono istniejącą fakturę: " + ", ".join(done)) if done else "duplikat (już w bazie)"
         created = False

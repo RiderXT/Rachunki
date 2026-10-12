@@ -264,8 +264,17 @@ def year_overlay(daily, months, value):
 GAS_KINDS = {"abonament": "Opłata abonamentowa", "paliwo": "Paliwo gazowe",
              "dystr_stala": "Dystrybucyjna stała", "dystr_zmienna": "Dystrybucyjna zmienna",
              "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
-GAS_FIXED = ("abonament", "dystr_stala")        # opłaty stałe (zł / miesiąc)
-GAS_VARIABLE = ("paliwo", "dystr_zmienna")      # opłaty zmienne (zł / kWh)
+POWER_KINDS = {"energia": "Energia elektryczna czynna", "dystr_stala": "Opłata stała sieciowa",
+               "mocowa": "Opłata mocowa", "dystr_zmienna": "Opłata zmienna sieciowa",
+               "jakosciowa": "Opłata jakościowa", "oze": "Opłata OZE", "kogeneracyjna": "Opłata kogeneracyjna",
+               "abonament": "Opłata abonamentowa", "przejsciowa": "Opłata przejściowa",
+               "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
+LABELS = {"gaz": GAS_KINDS, "prad": POWER_KINDS}
+# opłaty stałe (zł / miesiąc) i zależne od zużycia (zł / kWh) wg medium
+FIXED_KINDS = {"gaz": ("abonament", "dystr_stala"), "prad": ("abonament", "dystr_stala", "mocowa", "przejsciowa")}
+VARIABLE_KINDS = {"gaz": ("paliwo", "dystr_zmienna"),
+                  "prad": ("energia", "dystr_zmienna", "jakosciowa", "oze", "kogeneracyjna")}
+GAS_FIXED, GAS_VARIABLE = FIXED_KINDS["gaz"], VARIABLE_KINDS["gaz"]
 
 
 def balance_history(bills, utility="gaz"):
@@ -314,8 +323,8 @@ def cost_by_kind(daily_items, months):
     return t.sort_values("cost", ascending=False)
 
 
-def _gas_price_rows(conn, bills):
-    """Pozycje gazu z ceną jednostkową: data okresu, rodzaj, cena brutto (zł/kWh albo zł/mc)."""
+def _price_rows(conn, bills, utility):
+    """Pozycje z ceną jednostkową: data okresu, rodzaj, cena brutto (zł/kWh albo zł/mc)."""
     items = pd.read_sql_query(
         "SELECT bill_id, kind, unit, unit_price, vat_rate, period_start, period_end FROM bill_items "
         "WHERE unit_price IS NOT NULL", conn)
@@ -324,15 +333,15 @@ def _gas_price_rows(conn, bills):
     for c in ("period_start", "period_end"):
         items[c] = pd.to_datetime(items[c], errors="coerce")
     items = items.merge(bills[["id", "utility", "issue_date"]], left_on="bill_id", right_on="id")
-    items = items[items["utility"] == "gaz"].copy()
+    items = items[items["utility"] == utility].copy()
     items["date"] = items["period_end"].fillna(items["issue_date"])
     items["price"] = items["unit_price"] * (1 + items["vat_rate"].fillna(0) / 100)
     return items
 
 
-def gas_price_series(conn, bills):
+def price_series(conn, bills, utility):
     """(ceny zmienne zł/kWh, opłaty stałe zł/mc) w czasie, brutto, per rodzaj opłaty."""
-    items = _gas_price_rows(conn, bills)
+    items = _price_rows(conn, bills, utility)
     if items.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -341,20 +350,28 @@ def gas_price_series(conn, bills):
         if x.empty:
             return pd.DataFrame()
         return x.pivot_table(index="date", columns="kind", values="price", aggfunc="mean").sort_index().rename(
-            columns=GAS_KINDS)
-    return pivot(GAS_VARIABLE), pivot(GAS_FIXED)
+            columns=LABELS[utility])
+    return pivot(VARIABLE_KINDS[utility]), pivot(FIXED_KINDS[utility])
+
+
+def forecast(conn, bills, utility, annual_usage):
+    """Roczny koszt przy aktualnych cenach: opłaty stałe x 12 + zużycie (kWh) x cena zmienna. None, gdy brak cen."""
+    items = _price_rows(conn, bills, utility)
+    if items.empty or not annual_usage:
+        return None
+    latest = items.sort_values(["date", "bill_id"]).groupby("kind").tail(1).set_index("kind")["price"]
+    fixed = sum(latest.get(k, 0.0) for k in FIXED_KINDS[utility])
+    variable = sum(latest.get(k, 0.0) for k in VARIABLE_KINDS[utility])
+    if not fixed and not variable:
+        return None
+    annual = fixed * 12 + variable * annual_usage
+    return {"fixed_month": fixed, "per_kwh": variable, "annual_kwh": annual_usage,
+            "annual_cost": annual, "per_month": annual / 12}
+
+
+def gas_price_series(conn, bills):
+    return price_series(conn, bills, "gaz")
 
 
 def gas_forecast(conn, bills, annual_kwh):
-    """Roczny koszt przy aktualnych cenach: opłaty stałe x 12 + zużycie (kWh) x cena zmienna. None, gdy brak cen."""
-    items = _gas_price_rows(conn, bills)
-    if items.empty or not annual_kwh:
-        return None
-    latest = items.sort_values(["date", "bill_id"]).groupby("kind").tail(1).set_index("kind")["price"]
-    fixed = sum(latest.get(k, 0.0) for k in GAS_FIXED)
-    variable = sum(latest.get(k, 0.0) for k in GAS_VARIABLE)
-    if not fixed and not variable:
-        return None
-    annual = fixed * 12 + variable * annual_kwh
-    return {"fixed_month": fixed, "per_kwh": variable, "annual_kwh": annual_kwh,
-            "annual_cost": annual, "per_month": annual / 12}
+    return forecast(conn, bills, "gaz", annual_kwh)

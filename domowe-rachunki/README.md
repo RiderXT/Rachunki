@@ -71,6 +71,11 @@ skryptem, a logowanie może wymagać kodu SMS), więc faktur nie pobiera się au
    `ENEA_SENDER=powiadomienia@ebok.enea.pl` w `.env` (korzysta z `IMAP_*`; obsługuje je usługa `water-sync`).
 2. Rekord czeka na PDF (informacja w zakładce „Wgraj PDF”). Po wgraniu PDF dopasowuje się po numerze,
    uzupełnia kwotę, okres i datę, a duplikatów nie tworzy.
+3. Faktury Enei (rozliczeniowe, z energią i dystrybucją) są odczytywane w całości: kwota, okres, zużycie
+   w kWh, **wynik rozliczenia** (nadpłata lub do zapłaty, czyli „skarbonka” u Enei) i pozycje kosztów
+   (energia czynna, opłata stała sieciowa, mocowa, zmienna, jakościowa, OZE, kogeneracyjna, abonamentowa).
+   Zakładka „Prąd” pokazuje to samo co „Gaz”: stan konta, zużycie i koszty, rok do roku, z czego składa się
+   rachunek, ceny jednostkowe w czasie i prognozę roczną przy obecnych cenach.
 
 ### Pobranie wielu PDF-ów naraz (np. historia)
 
