@@ -6,15 +6,12 @@ Mail z powiadomienia zawiera numer faktury i datę, ale nie zawiera kwoty brutto
 
 Włączane przez ENEA_SENDER w .env (np. powiadomienia@ebok.enea.pl); korzysta z tych samych IMAP_*.
 """
-import email
 import email.utils
-import hashlib
-import imaplib
 import logging
 import os
 import re
 
-from app import db
+from app import db, mailbox
 from app import water_mail as w
 
 log = logging.getLogger("enea")
@@ -44,32 +41,13 @@ def handle_message(msg, mid):
         log.info("Mail %s: %s %s", mid, "dodano fakturę (czeka na PDF)" if created else "faktura już była", info)
     else:
         log.info("Mail %s: to nie powiadomienie o fakturze, pomijam", mid)
-    with db.conn() as c:
-        c.execute("INSERT OR IGNORE INTO processed_mail (message_id) VALUES (?)", [mid])
+    mailbox.mark_processed(mid)
     return created
 
 
 def process_mailbox():
-    env = os.environ
-    sender = env.get("ENEA_SENDER")
+    sender = os.environ.get("ENEA_SENDER")
     if not sender:
         return
-    imap = imaplib.IMAP4_SSL(env["IMAP_HOST"])
-    imap.login(env["IMAP_USER"], env["IMAP_PASSWORD"])
-    try:
-        imap.select(env.get("IMAP_FOLDER", "INBOX"), readonly=True)
-        since = w._imap_since(int(env.get("ENEA_SINCE_DAYS", "400")))
-        typ, data = imap.search(None, "FROM", f'"{sender}"', "SINCE", since)
-        ids = data[0].split()
-        log.info("Znaleziono %d maili od %s", len(ids), sender)
-        for num in ids:
-            typ, raw = imap.fetch(num, "(RFC822)")
-            raw_bytes = raw[0][1]
-            msg = email.message_from_bytes(raw_bytes)
-            mid = msg.get("Message-ID") or hashlib.sha1(raw_bytes).hexdigest()
-            with db.conn() as c:
-                if c.execute("SELECT 1 FROM processed_mail WHERE message_id=?", [mid]).fetchone():
-                    continue
-            handle_message(msg, mid)
-    finally:
-        imap.logout()
+    for mid, msg in mailbox.new_messages(sender, os.environ.get("ENEA_SINCE_DAYS", "400")):
+        handle_message(msg, mid)

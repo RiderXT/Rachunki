@@ -1,6 +1,6 @@
 import pandas as pd
 
-UTILITIES = {"prad": "Prąd", "gaz": "Gaz", "woda": "Woda"}
+UTILITIES = {"prad": "Prąd", "gaz": "Gaz", "woda": "Woda", "paliwo": "Paliwo"}
 DATE_COLS = ["issue_date", "period_start", "period_end"]
 
 
@@ -64,6 +64,11 @@ def suggested_savings(df, window=12):
     d = daily_costs(df)
     rows = []
     for u in UTILITIES:
+        if u == "paliwo":
+            fm = fuel_months(df)[-window:]
+            total = float(fuel_monthly(df, fm)["cost"].sum()) if fm else 0.0
+            rows.append(dict(utility=u, months_used=len(fm), last_sum=total, per_month=total / len(fm) if fm else 0.0))
+            continue
         x = d[d["utility"] == u]
         if x.empty:
             rows.append(dict(utility=u, months_used=0, last_sum=0.0, per_month=0.0))
@@ -81,7 +86,7 @@ def suggested_savings(df, window=12):
 
 def savings_balance(df, contribution, start_month):
     """Saldo 'skarbonki': stałe wpłaty miesięczne minus faktury (wg daty wystawienia)."""
-    d = df.copy()
+    d = df[df["utility"] != "paliwo"].copy()   # paliwo to wydatek osobny od rachunków za media
     d["pay_date"] = d["issue_date"].fillna(d["period_end"])
     d = d.dropna(subset=["pay_date", "amount_gross"])
     if d.empty:
@@ -268,10 +273,10 @@ POWER_KINDS = {"energia": "Energia elektryczna czynna", "dystr_stala": "Opłata 
                "mocowa": "Opłata mocowa", "dystr_zmienna": "Opłata zmienna sieciowa",
                "jakosciowa": "Opłata jakościowa", "oze": "Opłata OZE", "kogeneracyjna": "Opłata kogeneracyjna",
                "abonament": "Opłata abonamentowa", "przejsciowa": "Opłata przejściowa",
-               "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
+               "handlowa": "Opłata handlowa", "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
 LABELS = {"gaz": GAS_KINDS, "prad": POWER_KINDS}
 # opłaty stałe (zł / miesiąc) i zależne od zużycia (zł / kWh) wg medium
-FIXED_KINDS = {"gaz": ("abonament", "dystr_stala"), "prad": ("abonament", "dystr_stala", "mocowa", "przejsciowa")}
+FIXED_KINDS = {"gaz": ("abonament", "dystr_stala"), "prad": ("abonament", "dystr_stala", "mocowa", "przejsciowa", "handlowa")}
 VARIABLE_KINDS = {"gaz": ("paliwo", "dystr_zmienna"),
                   "prad": ("energia", "dystr_zmienna", "jakosciowa", "oze", "kogeneracyjna")}
 GAS_FIXED, GAS_VARIABLE = FIXED_KINDS["gaz"], VARIABLE_KINDS["gaz"]
@@ -375,3 +380,82 @@ def gas_price_series(conn, bills):
 
 def gas_forecast(conn, bills, annual_kwh):
     return forecast(conn, bills, "gaz", annual_kwh)
+
+
+# ----------------------------------------------------------------------------------
+# Paliwo: pojedyncze zakupy (faktura = jedno tankowanie), miesiące kalendarzowe
+# ----------------------------------------------------------------------------------
+FUEL_KINDS = {"lpg": "Gaz LPG", "pb95": "Benzyna 95", "pb98": "Benzyna 98", "diesel": "Diesel (ON)",
+              "adblue": "AdBlue", "inne": "Inne (sklep, myjnia)"}
+
+
+def fuel_bills(bills):
+    b = bills[(bills["utility"] == "paliwo") & bills["amount_gross"].notna() & bills["issue_date"].notna()]
+    return b.sort_values("issue_date")
+
+
+def fuel_months(bills, today=None):
+    """Miesiące od pierwszego zakupu do ostatniego zakończonego miesiąca (miesiąc bez tankowania to zero)."""
+    b = fuel_bills(bills)
+    if b.empty:
+        return []
+    last = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).to_period("M") - 1
+    first = b["issue_date"].min().to_period("M")
+    return list(pd.period_range(first, last, freq="M")) if first <= last else []
+
+
+def fuel_monthly(bills, months):
+    """Koszt, liczba tankowań i litry w każdym z podanych miesięcy (brak zakupów = 0)."""
+    b = fuel_bills(bills)
+    g = b.groupby(b["issue_date"].dt.to_period("M")).agg(
+        cost=("amount_gross", "sum"), refuels=("amount_gross", "size"), liters=("consumption", "sum"))
+    return g.reindex(months, fill_value=0.0)
+
+
+def fuel_summary(bills, months):
+    """Podsumowanie okresu: koszt, tankowania, litry, średni koszt tankowania, średnio na miesiąc, cena za litr."""
+    if not months:
+        return None
+    m = fuel_monthly(bills, months)
+    b = fuel_bills(bills)
+    inp = b[b["issue_date"].dt.to_period("M").isin(months)]
+    with_l = inp[inp["consumption"] > 0]
+    cost, refuels = float(m["cost"].sum()), int(m["refuels"].sum())
+    liters = float(with_l["consumption"].sum())
+    return {"cost": cost, "refuels": refuels, "liters": liters,
+            "avg_refuel": cost / refuels if refuels else 0.0, "avg_month": cost / len(months),
+            "price_per_l": float(with_l["amount_gross"].sum()) / liters if liters else None}
+
+
+def fuel_compare(bills, months, all_months):
+    """Okres vs te same miesiące rok wcześniej (tylko miesiące, które istnieją po obu stronach)."""
+    done = set(all_months)
+    common = [m for m in months if (m - 12) in done]
+    if not common:
+        return None, 0
+    return {"now": fuel_summary(bills, common), "before": fuel_summary(bills, [m - 12 for m in common])}, len(common)
+
+
+def fuel_by_kind(conn, bills, months):
+    """Litry i koszt wg rodzaju paliwa z pozycji faktur w podanych miesiącach."""
+    items = pd.read_sql_query("SELECT bill_id, kind, quantity, unit, amount_gross FROM bill_items WHERE meter='paliwo'", conn)
+    if items.empty or not months:
+        return pd.DataFrame(columns=["liters", "cost"])
+    b = fuel_bills(bills)[["id", "issue_date"]]
+    x = items.merge(b, left_on="bill_id", right_on="id")
+    x = x[x["issue_date"].dt.to_period("M").isin(months)]
+    x["liters"] = x["quantity"].where(x["unit"] == "l", 0.0)
+    return x.groupby("kind").agg(liters=("liters", "sum"), cost=("amount_gross", "sum")).sort_values("cost", ascending=False)
+
+
+# ----------------------------------------------------------------------------------
+# Kontrola odczytu: ile faktur ma pozycje kosztów i czy ich suma zgadza się z kwotą faktury
+# ----------------------------------------------------------------------------------
+def items_coverage(conn, bills, utility):
+    b = bills[bills["utility"] == utility][["id", "invoice_no", "issue_date", "amount_gross", "status"]].copy()
+    it = pd.read_sql_query("SELECT bill_id, COUNT(*) AS n, SUM(amount_gross) AS total FROM bill_items GROUP BY bill_id", conn)
+    b = b.merge(it, left_on="id", right_on="bill_id", how="left")
+    b["n"] = b["n"].fillna(0).astype(int)
+    b["diff"] = b["total"] - b["amount_gross"]
+    b["ok"] = (b["n"] > 0) & (b["diff"].abs() <= 0.01 * b["n"] + 0.03)
+    return b.sort_values("issue_date", ascending=False).reset_index(drop=True)

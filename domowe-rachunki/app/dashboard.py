@@ -23,9 +23,9 @@ if _pw and not st.session_state.get("auth"):
     st.stop()
 
 LABEL = stats.UTILITIES
-DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi"}
+DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi", "paliwo": "ORLEN"}
 EDIT_COLS = ["provider", "utility", "invoice_no", "issue_date", "period_start",
-             "period_end", "amount_gross", "consumption", "unit"]
+             "period_end", "amount_gross", "consumption", "unit", "note"]
 
 
 def fmt(x):
@@ -67,7 +67,7 @@ water_bills = bills[bills["utility"] == "woda"]
 water_done = stats.complete_months(water_bills) if not water_bills.empty else []
 
 sav = stats.suggested_savings(bills) if not bills.empty else None
-suggested = float(sav["per_month"].sum()) if sav is not None else 0.0
+suggested = float(sav[sav["utility"] != "paliwo"]["per_month"].sum()) if sav is not None else 0.0
 
 st.sidebar.header("Skarbonka")
 contribution = st.sidebar.number_input("Miesięczna wpłata (zł)", min_value=0.0, step=10.0,
@@ -90,17 +90,20 @@ if not bills.empty:
                    "Uzupełnij je w zakładce „Lista” albo wgraj PDF faktury w zakładce „Wgraj PDF”. "
                    "Bez okresu kwota liczona jest do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
-t_stats, t_water, t_gas, t_power, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
-    ["Statystyki", "Woda", "Gaz", "Prąd", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
+t_stats, t_water, t_gas, t_power, t_fuel, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
+    ["Statystyki", "Woda", "Gaz", "Prąd", "Paliwo", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
 
 with t_stats:
     if bills.empty:
         st.info("Brak danych. Dodaj pierwszą fakturę albo zaimportuj CSV.")
     else:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Odkładaj miesięcznie (razem)", fmt(suggested))
-        m2.metric("Koszt z użytych miesięcy (razem)", fmt(float(sav["last_sum"].sum())))
-        m3.metric("Liczba faktur", len(bills))
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Odkładaj miesięcznie (media)", fmt(suggested), help="Prąd, gaz i woda; paliwo jest osobno.")
+        m2.metric("Koszt z użytych miesięcy (media)",
+                  fmt(float(sav[sav["utility"] != "paliwo"]["last_sum"].sum())))
+        _fuel = sav[sav["utility"] == "paliwo"].iloc[0]
+        m3.metric("Paliwo średnio / miesiąc", fmt(float(_fuel["per_month"])) if _fuel["months_used"] else "brak danych")
+        m4.metric("Liczba faktur", len(bills))
 
         table = pd.DataFrame({
             "Medium": sav["utility"].map(LABEL),
@@ -213,6 +216,22 @@ def utility_tab(utility, noun, owner, price_title, empty_msg):
         if len(hist) > 1:
             st.line_chart(hist.set_index("date")[["balance"]].rename(columns={"balance": "Stan konta (zł)"}))
 
+    with db.conn() as cc:
+        cov = stats.items_coverage(cc, bills, utility)
+    if not cov.empty:
+        bad = cov[~cov["ok"]]
+        with st.expander(f"Kontrola odczytu pozycji z faktur: {len(cov) - len(bad)} z {len(cov)} odczytanych w całości"):
+            if bad.empty:
+                st.success("Wszystkie faktury mają odczytane pozycje, a ich suma zgadza się z kwotą faktury.")
+            else:
+                st.warning("Te faktury nie mają pozycji albo ich suma nie zgadza się z kwotą faktury (np. inny układ PDF). "
+                           "Spróbuj przycisku „Przelicz faktury z zapisanych PDF-ów” w zakładce „Wgraj PDF”. "
+                           "Jeśli to nie pomoże, wgraj tu jeden z tych PDF-ów do rozpoznania.")
+                st.dataframe(pd.DataFrame({
+                    "Numer": bad["invoice_no"], "Wystawiona": bad["issue_date"].dt.strftime("%Y-%m-%d"),
+                    "Kwota (zł)": bad["amount_gross"], "Pozycji": bad["n"], "Suma pozycji (zł)": bad["total"].round(2),
+                    "Różnica (zł)": bad["diff"].round(2)}), hide_index=True)
+
     months = usage_tab(daily, done, utility, noun, "kWh", price, price_title, empty_msg)
     if not months:
         return
@@ -236,10 +255,17 @@ def utility_tab(utility, noun, owner, price_title, empty_msg):
         st.caption("Kwoty brutto, rozłożone na dni okresów rozliczeniowych poszczególnych pozycji.")
     if not prices_var.empty:
         st.subheader("Ceny za kWh, brutto (zł)")
-        st.line_chart(prices_var)
+        if len(prices_var) > 1:
+            st.line_chart(prices_var)
+        st.dataframe(pd.DataFrame({"Aktualnie (zł / kWh)": prices_var.ffill().iloc[-1].round(4)}))
     if not prices_fixed.empty:
         st.subheader("Opłaty stałe za miesiąc, brutto (zł)")
-        st.line_chart(prices_fixed)
+        if len(prices_fixed) > 1:
+            st.line_chart(prices_fixed)
+        st.dataframe(pd.DataFrame({"Aktualnie (zł / mies.)": prices_fixed.ffill().iloc[-1].round(2)}))
+    else:
+        st.info("Nie odczytano opłat stałych (abonament, opłata stała sieciowa, mocowa) z żadnej faktury. "
+                "Zobacz „Kontrolę odczytu pozycji z faktur” na górze tej zakładki.")
     if fc:
         st.subheader("Prognoza roczna przy obecnych cenach")
         p1, p2, p3 = st.columns(3)
@@ -261,6 +287,69 @@ with t_power:
     utility_tab("prad", "prądu", "Enei", "Koszt za kWh na kolejnych fakturach (z opłatami stałymi)",
                 "Brak w pełni pokrytych miesięcy z fakturami za prąd. Wgraj faktury Enei w zakładce „Wgraj PDF”. "
                 "Historię pobierzesz hurtowo skryptem opisanym w README.")
+
+with t_fuel:
+    fb = stats.fuel_bills(bills)
+    if fb.empty:
+        st.info("Brak faktur za paliwo. Włącz powiadomienia ORLEN Pay (FUEL_SENDER w .env) albo wgraj faktury "
+                "w zakładce „Wgraj PDF”.")
+    else:
+        fmonths = stats.fuel_months(bills)
+        months = []
+        if not fmonths:
+            st.info("Pierwsze zakupy są z bieżącego miesiąca: statystyki okresowe pojawią się po jego zakończeniu.")
+        else:
+            years = sorted({m.year for m in fmonths}, reverse=True)
+            choice = st.selectbox("Okres", ["Ostatnie 12 miesięcy"] + [f"Rok {y}" for y in years], key="period_fuel")
+            months = fmonths[-12:] if choice.startswith("Ostatnie") else \
+                [m for m in fmonths if m.year == int(choice.split()[1])]
+            summ = stats.fuel_summary(bills, months)
+            st.caption(f"Pełne miesiące w okresie: {len(months)} ({months[0]} – {months[-1]}). Miesiąc bez tankowania "
+                       f"liczy się jako zero. Dane są od pierwszej faktury ({fb['issue_date'].min():%Y-%m-%d}).")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Koszt paliwa", fmt(summ["cost"]))
+            k2.metric("Tankowań", summ["refuels"])
+            k3.metric("Średnio / tankowanie", fmt(summ["avg_refuel"]))
+            k4.metric("Średnio / miesiąc", fmt(summ["avg_month"]))
+            if summ["liters"]:
+                l1, l2 = st.columns(2)
+                l1.metric("Litry", f"{summ['liters']:,.0f} l".replace(",", " "))
+                l2.metric("Średnia cena za litr", f"{summ['price_per_l']:.2f} zł".replace(".", ","))
+            with db.conn() as fc_:
+                kinds = stats.fuel_by_kind(fc_, bills, months)
+            if not kinds.empty:
+                st.subheader("Wg rodzaju paliwa")
+                kk = kinds.rename(index=lambda k: stats.FUEL_KINDS.get(k, k))
+                st.dataframe(pd.DataFrame({"Litry": kk["liters"].round(1), "Koszt (zł)": kk["cost"].round(2)}))
+
+            st.subheader("Rok do roku")
+            cmp_, n_common = stats.fuel_compare(bills, months, fmonths)
+            if not cmp_:
+                st.info("Za mało danych do porównania: potrzebne są te same miesiące z poprzedniego roku.")
+            else:
+                st.caption(f"Porównanie na {n_common} wspólnych miesiącach (te same miesiące rok wcześniej).")
+                now, before = cmp_["now"], cmp_["before"]
+                chg = lambda a, b: round((a / b - 1) * 100, 1) if b else None  # noqa: E731
+                st.dataframe(pd.DataFrame({
+                    "Teraz": [round(now["cost"], 2), now["refuels"], round(now["liters"], 1)],
+                    "Rok wcześniej": [round(before["cost"], 2), before["refuels"], round(before["liters"], 1)],
+                    "Zmiana (%)": [chg(now["cost"], before["cost"]), chg(now["refuels"], before["refuels"]),
+                                   chg(now["liters"], before["liters"])]},
+                    index=["Koszt (zł)", "Tankowań", "Litry"]))
+
+            st.subheader("Koszt miesięczny (zł)")
+            mm = stats.fuel_monthly(bills, months)
+            mm.index = mm.index.to_timestamp()
+            st.bar_chart(mm[["cost"]].rename(columns={"cost": "Paliwo (zł)"}))
+
+        st.subheader("Tankowania")
+        shown = fb[fb["issue_date"].dt.to_period("M").isin(months)] if months else fb
+        shown = shown.sort_values("issue_date", ascending=False)
+        st.dataframe(pd.DataFrame({
+            "Data": shown["issue_date"].dt.strftime("%Y-%m-%d"), "Stacja": shown["note"],
+            "Kwota (zł)": shown["amount_gross"], "Litry": shown["consumption"].where(shown["consumption"] > 0),
+            "Cena za litr (zł)": (shown["amount_gross"] / shown["consumption"]).where(shown["consumption"] > 0).round(3),
+            "Numer faktury": shown["invoice_no"]}), hide_index=True)
 
 with t_files:
     if bills.empty:
@@ -322,6 +411,11 @@ with t_upload:
         st.session_state["upload_rows"] = [
             invoices.ingest(f.getvalue(), f.name, hint, PDF_DIR) for f in uploads]
         st.rerun()
+    if st.button("Przelicz faktury z zapisanych PDF-ów",
+                 help="Ponownie odczytuje wszystkie zapisane PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. "
+                      "Przydaje się, gdy faktury wgrano starszą wersją programu."):
+        st.session_state["upload_rows"] = invoices.reparse_all()
+        st.rerun()
     if "upload_rows" in st.session_state:
         st.subheader("Wynik")
         st.dataframe(pd.DataFrame(st.session_state.pop("upload_rows")), hide_index=True)
@@ -338,13 +432,15 @@ with t_add:
         pe = c2.date_input("Okres do", value=None)
         amount = st.number_input("Kwota brutto (zł)", min_value=0.0, step=1.0, format="%.2f")
         cons = st.number_input("Zużycie (opcjonalnie)", min_value=0.0, step=1.0, format="%.2f")
-        unit = st.selectbox("Jednostka zużycia", ["", "kWh", "m3"])
+        unit = st.selectbox("Jednostka zużycia", ["", "kWh", "m3", "l"])
         if st.form_submit_button("Zapisz"):
+            ps_v = ps or (issue if u == "paliwo" else None)   # paliwo to zakup jednego dnia
+            pe_v = pe or (issue if u == "paliwo" else None)
             ok = db.add_bill(
                 provider=provider or DEFAULT_PROVIDER[u], utility=u, invoice_no=inv,
                 issue_date=issue.isoformat(),
-                period_start=ps.isoformat() if ps else None,
-                period_end=pe.isoformat() if pe else None,
+                period_start=ps_v.isoformat() if ps_v else None,
+                period_end=pe_v.isoformat() if pe_v else None,
                 amount_gross=amount, consumption=cons or None, unit=unit, source="manual")
             st.session_state["flash"] = "Dodano fakturę." if ok else \
                 "Faktura o tym numerze i dostawcy już istnieje."

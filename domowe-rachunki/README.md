@@ -108,6 +108,25 @@ na dysk. Potem przeciągnij je do zakładki „Wgraj PDF”.
 Skrypt jest napisany na podstawie elementów strony faktur (`data-action="download-document-api"`), ale nie
 był testowany na prawdziwej stronie. Jeśli coś nie zadziała, komunikat w konsoli powie, co zwrócił serwer.
 
+## Paliwo (ORLEN Pay)
+
+Po każdym tankowaniu przez aplikację ORLEN Pay przychodzi mail z e-fakturą i załączonym PDF-em. Konektor
+(włączany przez `FUEL_SENDER=orlenpay@orlen.pl` w `.env`, obsługuje go usługa `water-sync`) zakłada fakturę
+(numer, data, stacja z godziną, kwota), zapisuje PDF i odczytuje z niego litry oraz rodzaj paliwa (np. gaz LPG).
+Faktury za paliwo można też wgrać w zakładce „Wgraj PDF” (wystawcą bywa dealer stacji, np. spółdzielnia
+kółek rolniczych, a dostawca jest rozpoznawany po „ORLEN Pay” i „stacja paliw”) albo dodać ręcznie.
+Zakładka „Paliwo” pokazuje koszt, liczbę tankowań, litry, średnią cenę za litr, rok do roku, podział wg
+rodzaju paliwa i listę tankowań. Miesiąc bez tankowania liczy się jako zero, a dane są od pierwszej faktury.
+Paliwo jest w statystykach osobno: „Odkładaj miesięcznie” dotyczy tylko mediów (prąd, gaz, woda).
+
+## Przeliczanie faktur z zapisanych PDF-ów
+
+Przycisk „Przelicz faktury z zapisanych PDF-ów” (zakładka „Wgraj PDF”) ponownie odczytuje wszystkie zapisane
+PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. Użyj go po aktualizacji programu albo gdy faktury
+wgrano starszą wersją. Wynik pokazuje dla każdej faktury liczbę pozycji i ostrzeżenia (brak pozycji, suma
+pozycji różna od kwoty). W zakładkach „Gaz” i „Prąd” jest też „Kontrola odczytu pozycji z faktur”, która
+wskazuje faktury odczytane niepełnie.
+
 ## Faktury PDF
 
 Zakładka „Faktury PDF”: wybierasz medium, rok i fakturę, klikasz „Pobierz PDF”. Faktury, które nie

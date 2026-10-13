@@ -4,11 +4,10 @@ from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", "/data/rachunki.sqlite")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS bills (
+BILLS_COLUMNS = """
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   provider TEXT NOT NULL,
-  utility TEXT NOT NULL CHECK (utility IN ('prad','gaz','woda')),
+  utility TEXT NOT NULL,                  -- prad | gaz | woda | paliwo (walidowane w aplikacji)
   invoice_no TEXT,
   issue_date TEXT,
   period_start TEXT,
@@ -17,17 +16,22 @@ CREATE TABLE IF NOT EXISTS bills (
   consumption REAL,
   unit TEXT,
   status TEXT NOT NULL DEFAULT 'ok',      -- ok | partial (brak okresu lub kwoty)
-  source TEXT NOT NULL DEFAULT 'manual',  -- manual | csv | mail-woda | ...
+  source TEXT NOT NULL DEFAULT 'manual',  -- manual | csv | upload | mail-... | pgnig-api
   pdf_path TEXT,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  account_balance REAL,                   -- stan konta u dostawcy po rozliczeniu (+ nadpłata, - zaległość)
+  note TEXT                               -- np. stacja paliw
+"""
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS bills ({BILLS_COLUMNS});
 CREATE UNIQUE INDEX IF NOT EXISTS ux_bills_invoice
   ON bills(provider, invoice_no) WHERE invoice_no IS NOT NULL;
 CREATE TABLE IF NOT EXISTS bill_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bill_id INTEGER NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
-  meter TEXT NOT NULL,          -- dom | ogrod | inny
-  kind TEXT NOT NULL,           -- woda | scieki | abonament
+  meter TEXT NOT NULL,          -- dom | ogrod | inny | gaz | prad | paliwo
+  kind TEXT NOT NULL,           -- woda | scieki | abonament | paliwo | ...
   quantity REAL,
   unit TEXT,
   amount_gross REAL NOT NULL,
@@ -45,16 +49,38 @@ ITEM_FIELDS = ["meter", "kind", "quantity", "unit", "amount_gross", "period_star
                "unit_price", "amount_net", "vat_rate"]
 FIELDS = ["provider", "utility", "invoice_no", "issue_date", "period_start",
           "period_end", "amount_gross", "consumption", "unit", "status",
-          "source", "pdf_path", "account_balance"]
+          "source", "pdf_path", "account_balance", "note"]
 
 
 NEW_COLUMNS = {  # kolumny dodane po pierwszym wydaniu: dopisywane do istniejących baz
-    "bills": [("account_balance", "REAL")],  # stan konta u dostawcy po rozliczeniu (+ nadpłata, - zaległość)
+    "bills": [("account_balance", "REAL"), ("note", "TEXT")],
     "bill_items": [("unit_price", "REAL"), ("amount_net", "REAL"), ("vat_rate", "REAL")],
 }
 
 
+def _drop_utility_check(c):
+    """Stare bazy mają CHECK (utility IN ('prad','gaz','woda')), który blokuje nowe media (paliwo).
+    SQLite nie umie zmienić CHECK, więc tabela jest przebudowywana (z kopią danych)."""
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bills'").fetchone()
+    if not row or "CHECK" not in row[0].upper():
+        return
+    cols = ", ".join(r[1] for r in c.execute("PRAGMA table_info(bills)"))
+    c.commit()
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.executescript(f"""
+BEGIN;
+CREATE TABLE bills_new ({BILLS_COLUMNS});
+INSERT INTO bills_new ({cols}) SELECT {cols} FROM bills;
+DROP TABLE bills;
+ALTER TABLE bills_new RENAME TO bills;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_bills_invoice ON bills(provider, invoice_no) WHERE invoice_no IS NOT NULL;
+COMMIT;
+""")
+    c.execute("PRAGMA foreign_keys=ON")
+
+
 def _migrate(c):
+    _drop_utility_check(c)
     for table, cols in NEW_COLUMNS.items():
         have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         for name, typ in cols:
@@ -143,14 +169,15 @@ def update_columns(bill_id, **cols):
         c.execute(f"UPDATE bills SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", [*cols.values(), bill_id])
 
 
-def fill_missing(bill_id, fields):
-    """Uzupełnia tylko puste pola istniejącej faktury (np. rekordu z maila) i przelicza jej status.
-    Zwraca listę uzupełnionych kolumn."""
+def fill_missing(bill_id, fields, overwrite=False):
+    """Uzupełnia puste pola istniejącej faktury (np. rekordu z maila) i przelicza jej status; z overwrite=True
+    nadpisuje też wypełnione (ponowny odczyt z PDF-a). Zwraca listę zmienionych kolumn."""
     skip = {"status", "source", "pdf_path"}
     with conn() as c:
         row = c.execute("SELECT * FROM bills WHERE id=?", [bill_id]).fetchone()
         upd = {k: v for k, v in fields.items()
-               if k in FIELDS and k not in skip and v is not None and row[k] is None}
+               if k in FIELDS and k not in skip and v is not None and (overwrite or row[k] is None)
+               and row[k] != v}
         merged = {k: row[k] for k in FIELDS}
         merged.update(upd)
         upd["status"] = compute_status(merged)

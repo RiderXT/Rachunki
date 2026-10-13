@@ -7,14 +7,15 @@ import hashlib
 import re
 from pathlib import Path
 
-from app import db, enea_pdf, gas_pdf
+from app import db, enea_pdf, fuel_pdf, gas_pdf
 from app import water_mail as water
 
-DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi"}
+DEFAULT_PROVIDER = {"prad": "Enea", "gaz": "PGNiG", "woda": "Wodociągi", "paliwo": "ORLEN"}
 PROVIDERS = [  # (medium, dostawca, wzorzec rozpoznawczy w tekście faktury)
     ("woda", "Wodociągi", re.compile(r"Gospodarki Komunalnej|zgkszamotuly", re.I)),
     ("gaz", "PGNiG", re.compile(r"PGNiG|Polskie G[óo]rnictwo Naftowe|ebok\.pgnig|myORLEN", re.I)),
     ("prad", "Enea", re.compile(r"\bEnea\b", re.I)),
+    ("paliwo", "ORLEN", re.compile(r"ORLEN\s+Pay|STACJA\s+PALIW", re.I)),
 ]
 RE_PERIOD_GENERIC = re.compile(
     r"okres[^\d]{0,60}" + water.DATE_ANY + r"\s*(?:-|–|—|do|\.{2,3})\s*" + water.DATE_ANY, re.I)
@@ -90,6 +91,8 @@ def ingest(data, filename, hint, pdf_dir):
         fields, items = gas_pdf.parse_text(text), gas_pdf.parse_items(text)
     elif utility == "prad" and re.search(r"\bEnea\b", text, re.I):
         fields, items = enea_pdf.parse_text(text), enea_pdf.parse_items(text)
+    elif utility == "paliwo":
+        fields, items = fuel_pdf.parse_text(text), fuel_pdf.parse_items(text)
     else:
         fields, items = generic_fields(text), []
 
@@ -137,3 +140,50 @@ def ingest(data, filename, hint, pdf_dir):
         else:
             row["Wynik"] = "dodano, ale dane niepełne: uzupełnij w zakładce Lista"
     return row
+
+
+PARSERS = {"woda": (water.parse_text, water.parse_items), "gaz": (gas_pdf.parse_text, gas_pdf.parse_items),
+           "prad": (enea_pdf.parse_text, enea_pdf.parse_items), "paliwo": (fuel_pdf.parse_text, fuel_pdf.parse_items)}
+
+
+def reparse_all():
+    """Ponownie odczytuje wszystkie zapisane PDF-y faktur (po zmianie parsera lub gdy faktury wgrano starszą wersją):
+    nadpisuje kwotę, okres, zużycie i datę wystawienia danymi z PDF-a, odtwarza pozycje kosztów i stan konta.
+    Numer faktury i notatka (np. stacja) zostają. Zwraca wiersze do pokazania w tabeli."""
+    rows = []
+    with db.conn() as c:
+        bills = c.execute("SELECT id, provider, utility, invoice_no, pdf_path FROM bills "
+                          "WHERE pdf_path IS NOT NULL ORDER BY issue_date, id").fetchall()
+    for b in bills:
+        path = Path(b["pdf_path"])
+        row = {"Plik": path.name, "Dostawca": b["provider"], "Numer": b["invoice_no"] or "", "Kwota": "", "Okres": "", "Wynik": ""}
+        rows.append(row)
+        if not path.is_file():
+            row["Wynik"] = "brak pliku PDF"
+            continue
+        parser = PARSERS.get(b["utility"])
+        try:
+            text = water.pdf_text(path.read_bytes())
+            fields, items = parser[0](text), parser[1](text)
+        except Exception as e:  # noqa: BLE001
+            row["Wynik"] = f"nie udało się odczytać: {e}"
+            continue
+        fields.pop("invoice_no", None)
+        fields.pop("note", None)
+        db.fill_missing(b["id"], fields, overwrite=True)
+        if items:
+            db.replace_items(b["id"], items)
+        row["Kwota"] = f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else ""
+        row["Okres"] = f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else ""
+        notes = [f"pozycji: {len(items)}"]
+        if "account_balance" in fields:
+            notes.append(f"stan konta: {fields['account_balance']:.2f} zł")
+        total, amount = sum(i["amount_gross"] for i in items), fields.get("amount_gross")
+        if not items and b["utility"] != "paliwo":
+            notes.append("BRAK POZYCJI (inny układ PDF?)")
+        elif items and amount is not None and abs(total - amount) > 0.01 * len(items) + 0.03:
+            notes.append(f"UWAGA: suma pozycji {total:.2f} ≠ kwota {amount:.2f}")
+        if "amount_gross" not in fields:
+            notes.append("BRAK KWOTY")
+        row["Wynik"] = ", ".join(notes)
+    return rows

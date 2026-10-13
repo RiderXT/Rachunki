@@ -19,6 +19,8 @@ RE_ROW = re.compile(
     r"(?P<qty>\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d+)?|\d+(?:,\d+)?)\s+(?P<price>\d+,\d{2,5})\s+"
     r"(?P<net>-?\d[\d \u00a0]*,\d{2})\s+(?P<vat>\d{1,2})\s*$", re.I)
 NAME_KINDS = [("energia elektryczna", "energia"), ("opłata stała sieciowa", "dystr_stala"),
+              ("składnik stały stawki sieciowej", "dystr_stala"), ("składnik zmienny stawki sieciowej", "dystr_zmienna"),
+              ("opłata handlowa", "handlowa"), ("składnik", "inne"),
               ("opłata mocowa", "mocowa"), ("opłata zmienna sieciowa", "dystr_zmienna"),
               ("opłata jakościowa", "jakosciowa"), ("opłata oze", "oze"),
               ("opłata kogeneracyjna", "kogeneracyjna"), ("opłata abonamentowa", "abonament"),
