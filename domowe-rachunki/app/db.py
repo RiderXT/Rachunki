@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS bill_items (
   period_end TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_items_bill ON bill_items(bill_id);
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  amount REAL NOT NULL,                       -- kwota jednej płatności (zł)
+  cycle TEXT NOT NULL DEFAULT 'month',        -- month | quarter | year
+  next_date TEXT,                             -- data jednej z płatności (program sam liczy najbliższą)
+  active INTEGER NOT NULL DEFAULT 1,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS processed_mail (
   message_id TEXT PRIMARY KEY,
   processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

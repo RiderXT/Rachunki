@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from app import db, invoices, stats
+from app import db, invoices, stats, subscriptions
 from app.version import VERSION
 
 st.set_page_config(page_title="Rachunki domowe", layout="wide")
@@ -63,6 +63,8 @@ with db.conn() as c:
     bills = stats.load_bills(c)
     water_daily = stats.water_daily(c, bills)
     water_price = stats.water_price_series(c, bills)
+subs = subscriptions.load()
+sub_sum = subscriptions.summary(subs)
 water_bills = bills[bills["utility"] == "woda"]
 water_done = stats.complete_months(water_bills) if not water_bills.empty else []
 
@@ -90,8 +92,9 @@ if not bills.empty:
                    "Uzupełnij je w zakładce „Lista” albo wgraj PDF faktury w zakładce „Wgraj PDF”. "
                    "Bez okresu kwota liczona jest do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
-t_stats, t_water, t_gas, t_power, t_fuel, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
-    ["Statystyki", "Woda", "Gaz", "Prąd", "Paliwo", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
+t_stats, t_water, t_gas, t_power, t_fuel, t_subs, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
+    ["Statystyki", "Woda", "Gaz", "Prąd", "Paliwo", "Subskrypcje", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę",
+     "Import CSV", "Lista"])
 
 with t_stats:
     if bills.empty:
@@ -104,6 +107,11 @@ with t_stats:
         _fuel = sav[sav["utility"] == "paliwo"].iloc[0]
         m3.metric("Paliwo średnio / miesiąc", fmt(float(_fuel["per_month"])) if _fuel["months_used"] else "brak danych")
         m4.metric("Liczba faktur", len(bills))
+        if not subs.empty:
+            sb1, sb2 = st.columns(2)
+            sb1.metric("Subskrypcje / miesiąc", fmt2(sub_sum["monthly"]))
+            sb2.metric("Stałe wydatki (media + subskrypcje) / miesiąc", fmt2(suggested + sub_sum["monthly"]),
+                       help="Media: średnia z ostatnich 12 pełnych miesięcy. Szczegóły w zakładce „Subskrypcje”.")
 
         table = pd.DataFrame({
             "Medium": sav["utility"].map(LABEL),
@@ -350,6 +358,94 @@ with t_fuel:
             "Kwota (zł)": shown["amount_gross"], "Litry": shown["consumption"].where(shown["consumption"] > 0),
             "Cena za litr (zł)": (shown["amount_gross"] / shown["consumption"]).where(shown["consumption"] > 0).round(3),
             "Numer faktury": shown["invoice_no"]}), hide_index=True)
+
+with t_subs:
+    st.write("Aktualne subskrypcje i inne stałe opłaty (np. Spotify, HBO, abonament telefoniczny). "
+             "Płatności roczne i kwartalne są przeliczane na miesiąc.")
+    cyc_labels = list(subscriptions.CYCLES.values())
+    cyc_by_label = {v: k for k, v in subscriptions.CYCLES.items()}
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Subskrypcje / miesiąc", fmt2(sub_sum["monthly"]))
+    k2.metric("Subskrypcje / rok", fmt(sub_sum["yearly"]))
+    k3.metric("Aktywnych", sub_sum["active"],
+              delta=f"{sub_sum['paused']} wstrzymanych" if sub_sum["paused"] else None, delta_color="off")
+
+    with st.form("add_sub", clear_on_submit=True):
+        f1, f2 = st.columns(2)
+        s_name = f1.text_input("Nazwa (np. Spotify)")
+        s_amount = f2.number_input("Kwota subskrypcji (zł)", min_value=0.0, step=1.0, format="%.2f")
+        f3, f4 = st.columns(2)
+        s_cycle = f3.selectbox("Płatność", cyc_labels)
+        s_next = f4.date_input("Data jednej z płatności (opcjonalnie)", value=None,
+                               help="Na tej podstawie program liczy najbliższą płatność.")
+        s_note = st.text_input("Notatka (opcjonalnie)")
+        if st.form_submit_button("Dodaj subskrypcję"):
+            try:
+                subscriptions.add(s_name, s_amount, cyc_by_label[s_cycle], s_next, s_note)
+                st.session_state["flash"] = f"Dodano subskrypcję: {s_name.strip()}."
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    if not subs.empty:
+        st.subheader("Lista")
+        table = pd.DataFrame({
+            "Usuń": False, "Aktywna": subs["active"], "Nazwa": subs["name"], "Kwota (zł)": subs["amount"],
+            "Płatność": subs["cycle"].map(subscriptions.CYCLES),
+            "Następna płatność": subs["next_date"].apply(lambda d: d.date() if pd.notna(d) else None),
+            "Na miesiąc (zł)": [round(subscriptions.monthly_equiv(a, c), 2) for a, c in zip(subs["amount"], subs["cycle"])],
+            "Notatka": subs["note"].fillna("")})
+        edited = st.data_editor(
+            table, hide_index=True, key="subs_editor", disabled=["Na miesiąc (zł)"],
+            column_config={
+                "Usuń": st.column_config.CheckboxColumn("Usuń"),
+                "Aktywna": st.column_config.CheckboxColumn("Aktywna"),
+                "Kwota (zł)": st.column_config.NumberColumn("Kwota (zł)", min_value=0.0, step=0.01, format="%.2f"),
+                "Płatność": st.column_config.SelectboxColumn("Płatność", options=cyc_labels, required=True),
+                "Następna płatność": st.column_config.DateColumn("Następna płatność")})
+        st.caption("Odznacz „Aktywna”, żeby wstrzymać subskrypcję bez usuwania (nie wlicza się do sum).")
+        if st.button("Zapisz zmiany", key="save_subs"):
+            errors, changed = [], 0
+            for sid, (_, old), new in zip(subs["id"], table.iterrows(), edited.to_dict("records")):
+                if new["Usuń"]:
+                    subscriptions.delete(int(sid))
+                    changed += 1
+                    continue
+                cols = ["Aktywna", "Nazwa", "Kwota (zł)", "Płatność", "Następna płatność", "Notatka"]
+                if all(clean(old[c]) == clean(new[c]) for c in cols):
+                    continue
+                try:
+                    subscriptions.update(int(sid), name=new["Nazwa"], amount=new["Kwota (zł)"],
+                                         cycle=cyc_by_label[new["Płatność"]], next_date=new["Następna płatność"],
+                                         active=new["Aktywna"], note=new["Notatka"])
+                    changed += 1
+                except ValueError as e:
+                    errors.append(f"{new['Nazwa'] or '(bez nazwy)'}: {e}")
+            if errors:
+                st.error("; ".join(errors))
+            st.session_state["flash"] = f"Zapisano zmian: {changed}."
+            if not errors:
+                st.rerun()
+
+    st.subheader("Stałe wydatki razem")
+    fuel_avg = float(sav.loc[sav["utility"] == "paliwo", "per_month"].iloc[0]) if sav is not None else 0.0
+    with_fuel = st.checkbox("Wlicz średnie miesięczne wydatki na paliwo", value=False, key="subs_with_fuel")
+    parts = [("Subskrypcje", sub_sum["monthly"]), ("Media (średnia z ostatnich 12 pełnych miesięcy)", suggested)]
+    if with_fuel:
+        parts.append(("Paliwo (średnia miesięczna)", fuel_avg))
+    grand = sum(v for _, v in parts)
+    st.dataframe(pd.DataFrame({
+        "Pozycja": [n for n, _ in parts] + ["Razem"],
+        "Miesięcznie (zł)": [round(v, 2) for _, v in parts] + [round(grand, 2)],
+        "Rocznie (zł)": [round(v * 12, 2) for _, v in parts] + [round(grand * 12, 2)]}), hide_index=True)
+    st.metric("Razem stałe wydatki / miesiąc", fmt2(grand))
+
+    up = subscriptions.upcoming(subs, days=30)
+    if not up.empty:
+        st.subheader("Najbliższe płatności (30 dni)")
+        st.dataframe(pd.DataFrame({"Data": up["date"].dt.strftime("%Y-%m-%d"), "Subskrypcja": up["name"],
+                                   "Kwota (zł)": up["amount"]}), hide_index=True)
+        st.caption(f"Razem w ciągu 30 dni: {fmt2(float(up['amount'].sum()))}")
 
 with t_files:
     if bills.empty:

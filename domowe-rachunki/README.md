@@ -119,6 +119,15 @@ Zakładka „Paliwo” pokazuje koszt, liczbę tankowań, litry, średnią cenę
 rodzaju paliwa i listę tankowań. Miesiąc bez tankowania liczy się jako zero, a dane są od pierwszej faktury.
 Paliwo jest w statystykach osobno: „Odkładaj miesięcznie” dotyczy tylko mediów (prąd, gaz, woda).
 
+## Subskrypcje
+
+Zakładka „Subskrypcje” to lista stałych opłat (np. Spotify, HBO, abonament telefoniczny): nazwa, kwota, cykl
+(miesięcznie, kwartalnie, rocznie), opcjonalna data jednej z płatności i notatka. Płatności roczne i kwartalne
+są przeliczane na miesiąc. Subskrypcję można wstrzymać (odznaczenie „Aktywna”) bez usuwania. Zakładka pokazuje
+sumy miesięczne i roczne, **stałe wydatki razem** (subskrypcje + media, opcjonalnie paliwo) oraz najbliższe
+płatności w ciągu 30 dni (liczone od podanej daty co cykl). W „Statystykach” są dwie dodatkowe metryki:
+subskrypcje na miesiąc i stałe wydatki (media + subskrypcje).
+
 ## Przeliczanie faktur z zapisanych PDF-ów
 
 Przycisk „Przelicz faktury z zapisanych PDF-ów” (zakładka „Wgraj PDF”) ponownie odczytuje wszystkie zapisane
