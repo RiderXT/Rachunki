@@ -123,8 +123,13 @@ def check():
         seen = {}
         for _, msg in mailbox._iter("orlen", since, env.get("FUEL_FOLDER")):
             seen[msg.get("From", "?")] = seen.get(msg.get("From", "?"), 0) + 1
-        print(seen or "brak. Być może maile są w innym folderze (ustaw FUEL_FOLDER, np. \"[Gmail]/Wszystkie\") "
-                      "albo nadawca jest inny.")
+        print(seen or "brak.")
+        try:
+            print("\nFoldery (w Gmailu także etykiety) na koncie. Jeśli faktury są w etykiecie, ustaw jej nazwę "
+                  "w .env jako FUEL_FOLDER (kilka folderów po przecinku, np. INBOX,faktury):")
+            print(mailbox.list_folders())
+        except Exception as e:  # noqa: BLE001
+            print("nie udało się pobrać listy folderów:", e)
 
 
 def main():

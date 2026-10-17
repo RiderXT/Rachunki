@@ -117,6 +117,10 @@ Faktury za paliwo można też wgrać w zakładce „Wgraj PDF” (wystawcą bywa
 kółek rolniczych, a dostawca jest rozpoznawany po „ORLEN Pay” i „stacja paliw”) albo dodać ręcznie.
 Zakładka „Paliwo” pokazuje koszt, liczbę tankowań, litry, średnią cenę za litr, rok do roku, podział wg
 rodzaju paliwa i listę tankowań. Miesiąc bez tankowania liczy się jako zero, a dane są od pierwszej faktury.
+Maile mogą leżeć w etykiecie Gmaila (np. „faktury”) zamiast w skrzynce odbiorczej: wtedy ustaw w `.env`
+`FUEL_FOLDER=faktury` (albo kilka folderów po przecinku, `INBOX,faktury`; to samo dla Enei: `ENEA_FOLDER`). Etykieta
+jest dla IMAP folderem o tej samej nazwie. Ten sam mail w kilku folderach jest liczony raz.
+
 Gdy faktury za paliwo się nie pojawiają, sprawdź, co konektor widzi w skrzynce (niczego nie zapisuje):
 
     docker compose run --rm water-sync python -m app.fuel_mail --check
@@ -141,7 +145,9 @@ subskrypcje na miesiąc i stałe wydatki (media + subskrypcje).
 Przycisk „Przelicz faktury z zapisanych PDF-ów” (zakładka „Wgraj PDF”) ponownie odczytuje wszystkie zapisane
 PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. Użyj go po aktualizacji programu albo gdy faktury
 wgrano starszą wersją. Wynik pokazuje dla każdej faktury liczbę pozycji i ostrzeżenia (brak pozycji, suma
-pozycji różna od kwoty). W zakładkach „Gaz” i „Prąd” jest też „Kontrola odczytu pozycji z faktur”, która
+pozycji różna od kwoty). Przeliczenie można ograniczyć do jednego medium i obserwować na pasku postępu, a z terminala (bez limitów
+przeglądarki) uruchomić je poleceniem `docker compose run --rm water-sync python -m app.invoices --reparse prad`
+(lub `gaz`, `woda`, `paliwo`, bez argumentu: wszystkie). W zakładkach „Gaz” i „Prąd” jest też „Kontrola odczytu pozycji z faktur”, która
 wskazuje faktury odczytane niepełnie.
 
 ## Faktury PDF

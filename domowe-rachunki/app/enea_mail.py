@@ -57,5 +57,5 @@ def process_mailbox():
     sender = os.environ.get("ENEA_SENDER")
     if not sender:
         return
-    for mid, msg in mailbox.new_messages(sender, os.environ.get("ENEA_SINCE_DAYS", "400"), NS):
+    for mid, msg in mailbox.new_messages(sender, os.environ.get("ENEA_SINCE_DAYS", "400"), NS, os.environ.get("ENEA_FOLDER")):
         handle_message(msg, mid)

@@ -507,10 +507,15 @@ with t_upload:
         st.session_state["upload_rows"] = [
             invoices.ingest(f.getvalue(), f.name, hint, PDF_DIR) for f in uploads]
         st.rerun()
+    rep_choice = st.selectbox("Które faktury przeliczyć", ["Wszystkie"] + list(hint_names), key="reparse_choice")
     if st.button("Przelicz faktury z zapisanych PDF-ów",
-                 help="Ponownie odczytuje wszystkie zapisane PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. "
-                      "Przydaje się, gdy faktury wgrano starszą wersją programu."):
-        st.session_state["upload_rows"] = invoices.reparse_all()
+                 help="Ponownie odczytuje zapisane PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. "
+                      "Przydaje się, gdy faktury wgrano starszą wersją programu. Każdy PDF to ok. sekundy, "
+                      "więc przy kilkudziesięciu fakturach trwa to chwilę."):
+        bar = st.progress(0.0, text="Przeliczanie...")
+        st.session_state["upload_rows"] = invoices.reparse_all(
+            None if rep_choice == "Wszystkie" else hint_names[rep_choice],
+            progress=lambda i, n, row: bar.progress(i / n, text=f"{i} z {n} faktur ({row['Numer']})"))
         st.rerun()
     if "upload_rows" in st.session_state:
         st.subheader("Wynik")

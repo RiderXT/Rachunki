@@ -146,44 +146,69 @@ PARSERS = {"woda": (water.parse_text, water.parse_items), "gaz": (gas_pdf.parse_
            "prad": (enea_pdf.parse_text, enea_pdf.parse_items), "paliwo": (fuel_pdf.parse_text, fuel_pdf.parse_items)}
 
 
-def reparse_all():
+def reparse_all(utility=None, progress=None):
     """Ponownie odczytuje wszystkie zapisane PDF-y faktur (po zmianie parsera lub gdy faktury wgrano starszą wersją):
     nadpisuje kwotę, okres, zużycie i datę wystawienia danymi z PDF-a, odtwarza pozycje kosztów i stan konta.
     Numer faktury i notatka (np. stacja) zostają. Zwraca wiersze do pokazania w tabeli."""
     rows = []
     with db.conn() as c:
         bills = c.execute("SELECT id, provider, utility, invoice_no, pdf_path FROM bills "
-                          "WHERE pdf_path IS NOT NULL ORDER BY issue_date, id").fetchall()
-    for b in bills:
+                          "WHERE pdf_path IS NOT NULL AND (? IS NULL OR utility=?) ORDER BY issue_date, id",
+                          [utility, utility]).fetchall()
+    for n, b in enumerate(bills, 1):
         path = Path(b["pdf_path"])
         row = {"Plik": path.name, "Dostawca": b["provider"], "Numer": b["invoice_no"] or "", "Kwota": "", "Okres": "", "Wynik": ""}
         rows.append(row)
-        if not path.is_file():
-            row["Wynik"] = "brak pliku PDF"
-            continue
-        parser = PARSERS.get(b["utility"])
         try:
-            text = water.pdf_text(path.read_bytes())
-            fields, items = parser[0](text), parser[1](text)
-        except Exception as e:  # noqa: BLE001
-            row["Wynik"] = f"nie udało się odczytać: {e}"
-            continue
-        fields.pop("invoice_no", None)
-        fields.pop("note", None)
-        db.fill_missing(b["id"], fields, overwrite=True)
-        if items:
-            db.replace_items(b["id"], items)
-        row["Kwota"] = f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else ""
-        row["Okres"] = f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else ""
-        notes = [f"pozycji: {len(items)}"]
-        if "account_balance" in fields:
-            notes.append(f"stan konta: {fields['account_balance']:.2f} zł")
-        total, amount = sum(i["amount_gross"] for i in items), fields.get("amount_gross")
-        if not items and b["utility"] != "paliwo":
-            notes.append("BRAK POZYCJI (inny układ PDF?)")
-        elif items and amount is not None and abs(total - amount) > 0.01 * len(items) + 0.03:
-            notes.append(f"UWAGA: suma pozycji {total:.2f} ≠ kwota {amount:.2f}")
-        if "amount_gross" not in fields:
-            notes.append("BRAK KWOTY")
-        row["Wynik"] = ", ".join(notes)
+            _reparse_one(b, path, row)
+        finally:
+            if progress:
+                progress(n, len(bills), row)
     return rows
+
+
+def _reparse_one(b, path, row):
+    if not path.is_file():
+        row["Wynik"] = "brak pliku PDF"
+        return
+    parser = PARSERS.get(b["utility"])
+    try:
+        text = water.pdf_text(path.read_bytes())
+        fields, items = parser[0](text), parser[1](text)
+    except Exception as e:  # noqa: BLE001
+        row["Wynik"] = f"nie udało się odczytać: {e}"
+        return
+    fields.pop("invoice_no", None)
+    fields.pop("note", None)
+    db.fill_missing(b["id"], fields, overwrite=True)
+    if items:
+        db.replace_items(b["id"], items)
+    row["Kwota"] = f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else ""
+    row["Okres"] = f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else ""
+    notes = [f"pozycji: {len(items)}"]
+    if "account_balance" in fields:
+        notes.append(f"stan konta: {fields['account_balance']:.2f} zł")
+    total, amount = sum(i["amount_gross"] for i in items), fields.get("amount_gross")
+    if not items and b["utility"] != "paliwo":
+        notes.append("BRAK POZYCJI (inny układ PDF?)")
+    elif items and amount is not None and abs(total - amount) > 0.01 * len(items) + 0.03:
+        notes.append(f"UWAGA: suma pozycji {total:.2f} ≠ kwota {amount:.2f}")
+    if "amount_gross" not in fields:
+        notes.append("BRAK KWOTY")
+    row["Wynik"] = ", ".join(notes)
+
+
+def main():
+    """python -m app.invoices --reparse [prad|gaz|woda|paliwo]: przeliczenie z terminala (bez limitów przeglądarki)."""
+    import logging
+    import sys
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    if "--reparse" in sys.argv:
+        util = next((a for a in sys.argv[sys.argv.index("--reparse") + 1:] if a in PARSERS), None)
+        reparse_all(util, progress=lambda i, n, r: print(f"[{i}/{n}] {r['Dostawca']} {r['Numer']} | {r['Wynik']}", flush=True))
+    else:
+        print(main.__doc__)
+
+
+if __name__ == "__main__":
+    main()
