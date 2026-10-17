@@ -117,6 +117,14 @@ Faktury za paliwo można też wgrać w zakładce „Wgraj PDF” (wystawcą bywa
 kółek rolniczych, a dostawca jest rozpoznawany po „ORLEN Pay” i „stacja paliw”) albo dodać ręcznie.
 Zakładka „Paliwo” pokazuje koszt, liczbę tankowań, litry, średnią cenę za litr, rok do roku, podział wg
 rodzaju paliwa i listę tankowań. Miesiąc bez tankowania liczy się jako zero, a dane są od pierwszej faktury.
+Gdy faktury za paliwo się nie pojawiają, sprawdź, co konektor widzi w skrzynce (niczego nie zapisuje):
+
+    docker compose run --rm water-sync python -m app.fuel_mail --check
+
+Dla każdego maila pokaże datę, temat, liczbę załączników PDF, to, co odczytano z treści i z PDF-a, oraz czy faktura
+jest już w bazie. Jeśli `FUEL_SENDER` dopisano do `.env` po uruchomieniu usługi, odtwórz kontener, bo zmienne są
+czytane tylko przy jego tworzeniu: `docker compose up -d --force-recreate water-sync`. Dane można brać z samej
+treści maila albo z samego PDF-a, więc zmiana wyglądu maila przez ORLEN nie blokuje importu, o ile jest załącznik.
 Paliwo jest w statystykach osobno: „Odkładaj miesięcznie” dotyczy tylko mediów (prąd, gaz, woda).
 
 ## Subskrypcje

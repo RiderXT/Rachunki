@@ -20,7 +20,7 @@ RE_NUMBER = re.compile(r"numerze\s+([A-Z]{1,4}/\d+/\d+/\d+)", re.I)
 
 def parse_notification(msg):
     """Numer faktury i data wystawienia (z nagłówka maila) albo None, jeśli to nie powiadomienie o fakturze."""
-    text = re.sub(r"<[^>]+>", " ", " ".join(w.message_bodies(msg)))
+    text = mailbox.text_of(msg)
     m = RE_NUMBER.search(text)
     if not m:
         return None
@@ -33,6 +33,9 @@ def parse_notification(msg):
     return {"invoice_no": m.group(1).upper(), "issue_date": issue}
 
 
+NS = "enea2:"          # nowy przedrostek znaczników: maile pominięte starszą wersją są sprawdzane ponownie
+
+
 def handle_message(msg, mid):
     info = parse_notification(msg)
     created = False
@@ -40,8 +43,13 @@ def handle_message(msg, mid):
         created = db.add_bill(provider="Enea", utility="prad", source="mail-enea", **info)
         log.info("Mail %s: %s %s", mid, "dodano fakturę (czeka na PDF)" if created else "faktura już była", info)
     else:
+        text = mailbox.text_of(msg).lower()
+        if "faktur" in text and "numer" in text:       # wygląda na powiadomienie, ale nie rozpoznano: nie "zapominamy"
+            log.warning("Mail %s wygląda na powiadomienie o fakturze, ale nie rozpoznano numeru (nie oznaczam jako "
+                        "przetworzony)", mid)
+            return False
         log.info("Mail %s: to nie powiadomienie o fakturze, pomijam", mid)
-    mailbox.mark_processed(mid)
+    mailbox.mark_processed(NS + mid)
     return created
 
 
@@ -49,5 +57,5 @@ def process_mailbox():
     sender = os.environ.get("ENEA_SENDER")
     if not sender:
         return
-    for mid, msg in mailbox.new_messages(sender, os.environ.get("ENEA_SINCE_DAYS", "400")):
+    for mid, msg in mailbox.new_messages(sender, os.environ.get("ENEA_SINCE_DAYS", "400"), NS):
         handle_message(msg, mid)
