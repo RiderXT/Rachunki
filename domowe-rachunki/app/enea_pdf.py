@@ -84,15 +84,48 @@ def parse_text(text):
     return out
 
 
+# Awaryjnie (gdy tabela pozycji ma inny układ): sumy sekcji "Ogółem wartość - sprzedaż energii" i "... usługa dystrybucji".
+# Używane tylko wtedy, gdy po doliczeniu VAT dokładnie zgadzają się z kwotą faktury.
+RE_SALES = re.compile(r"og[óo][łl]em\s+warto[śs][ćc]\s*-\s*sprzeda[żz]\s+energii:?\s*" + A, re.I)
+RE_DIST = re.compile(r"og[óo][łl]em\s+warto[śs][ćc]\s*-\s*us[łl]uga\s+dystrybucji(?:\s+energii)?:?\s*" + A, re.I)
+
+
+def totals_items(text, fields):
+    """Dwie pozycje zbiorcze (energia, dystrybucja razem) z sum sekcji, albo [] gdy nie zgadzają się z kwotą faktury."""
+    sales = [w._num(x) for x in RE_SALES.findall(text)]
+    dist = [w._num(x) for x in RE_DIST.findall(text)]
+    amount = fields.get("amount_gross")
+    if not sales or not dist or amount is None:
+        return []
+    s_net, d_net = round(sum(sales), 2), round(sum(dist), 2)
+    for vat in (23.0, 8.0, 5.0):
+        s_gross, d_gross = round(s_net * (1 + vat / 100), 2), round(d_net * (1 + vat / 100), 2)
+        if abs(s_gross + d_gross - amount) <= 0.05:
+            kwh = fields.get("consumption")
+            common = {"meter": "prad", "vat_rate": vat, "period_start": fields.get("period_start"),
+                      "period_end": fields.get("period_end")}
+            return [
+                {**common, "kind": "energia", "quantity": kwh, "unit": "kWh" if kwh else None,
+                 "unit_price": round(s_net / kwh, 5) if kwh else None, "amount_net": s_net, "amount_gross": s_gross},
+                {**common, "kind": "dystrybucja", "quantity": None, "unit": None, "unit_price": None,
+                 "amount_net": d_net, "amount_gross": d_gross}]
+    return []
+
+
+def parse_items_safe(text):
+    """Pozycje, którym można ufać: z tabeli, jeśli ich suma zgadza się z kwotą faktury; w przeciwnym razie awaryjny
+    podział z sum sekcji; w ostatecznosci [] (lepiej brak podziału niż błędny)."""
+    fields = parse_text(text)
+    items = parse_items(text)
+    if w.items_consistent(items, fields.get("amount_gross")):
+        return items
+    return totals_items(text, fields)
+
+
 def apply(bill_id, text):
     """Dopisuje do istniejącej faktury wynik rozliczenia (stan konta) i pozycje kosztów odczytane z PDF-a."""
-    fields, items = parse_text(text), parse_items(text)
-    with db.conn() as c:
-        row = c.execute("SELECT invoice_no, amount_gross FROM bills WHERE id=?", [bill_id]).fetchone()
-    if row:
-        w.check_items(items, row["amount_gross"], f"{row['invoice_no']}:")
+    fields, items = parse_text(text), parse_items_safe(text)
     if "account_balance" in fields:
         db.update_columns(bill_id, account_balance=fields["account_balance"])
-    if items:
-        db.replace_items(bill_id, items)
+    db.replace_items(bill_id, items)
     return fields, items

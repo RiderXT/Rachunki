@@ -145,7 +145,12 @@ subskrypcje na miesiąc i stałe wydatki (media + subskrypcje).
 Przycisk „Przelicz faktury z zapisanych PDF-ów” (zakładka „Wgraj PDF”) ponownie odczytuje wszystkie zapisane
 PDF-y: odtwarza pozycje kosztów, stan konta, kwoty i okresy. Użyj go po aktualizacji programu albo gdy faktury
 wgrano starszą wersją. Wynik pokazuje dla każdej faktury liczbę pozycji i ostrzeżenia (brak pozycji, suma
-pozycji różna od kwoty). Przeliczenie można ograniczyć do jednego medium i obserwować na pasku postępu, a z terminala (bez limitów
+pozycji różna od kwoty). Pozycje kosztów są zapisywane tylko wtedy, gdy ich suma zgadza się z kwotą faktury (z tolerancją na zaokrąglenia);
+niespójne pozycje, np. z PDF-a o innym układzie tabeli, są odrzucane, żeby nie zaniżały struktury kosztów i cen.
+Dla faktur Enei, których tabeli nie da się odczytać, program próbuje podziału zbiorczego (energia i dystrybucja
+razem) z sum sekcji „Ogółem wartość - sprzedaż energii” i „... usługa dystrybucji”, ale tylko gdy po doliczeniu VAT
+dokładnie zgadzają się z kwotą faktury. Faktury bez pozycji widać w „Kontroli odczytu pozycji z faktur”.
+Przeliczenie można ograniczyć do jednego medium i obserwować na pasku postępu, a z terminala (bez limitów
 przeglądarki) uruchomić je poleceniem `docker compose run --rm water-sync python -m app.invoices --reparse prad`
 (lub `gaz`, `woda`, `paliwo`, bez argumentu: wszystkie). W zakładkach „Gaz” i „Prąd” jest też „Kontrola odczytu pozycji z faktur”, która
 wskazuje faktury odczytane niepełnie.

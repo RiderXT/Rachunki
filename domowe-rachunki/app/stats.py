@@ -273,7 +273,7 @@ POWER_KINDS = {"energia": "Energia elektryczna czynna", "dystr_stala": "Opłata 
                "mocowa": "Opłata mocowa", "dystr_zmienna": "Opłata zmienna sieciowa",
                "jakosciowa": "Opłata jakościowa", "oze": "Opłata OZE", "kogeneracyjna": "Opłata kogeneracyjna",
                "abonament": "Opłata abonamentowa", "przejsciowa": "Opłata przejściowa",
-               "handlowa": "Opłata handlowa", "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
+               "handlowa": "Opłata handlowa", "dystrybucja": "Dystrybucja (razem)", "inne": "Inne opłaty", "razem": "Bez podziału (brak pozycji)"}
 LABELS = {"gaz": GAS_KINDS, "prad": POWER_KINDS}
 # opłaty stałe (zł / miesiąc) i zależne od zużycia (zł / kWh) wg medium
 FIXED_KINDS = {"gaz": ("abonament", "dystr_stala"), "prad": ("abonament", "dystr_stala", "mocowa", "przejsciowa", "handlowa")}

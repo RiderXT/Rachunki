@@ -99,6 +99,8 @@ def ingest(data, filename, hint, pdf_dir):
     if same_file_exists(provider, data):
         row.update(Dostawca=provider, Numer=fields.get("invoice_no") or "", Wynik="duplikat (ten sam plik już wgrano)")
         return row
+    if items and not water.items_consistent(items, fields.get("amount_gross")):
+        items = []       # niespójne pozycje nie trafiają do bazy (lepiej brak podziału niż błędny)
     existing = find_existing(provider, fields.get("invoice_no"), text)
     if existing is not None:
         number = existing["invoice_no"]
@@ -143,7 +145,7 @@ def ingest(data, filename, hint, pdf_dir):
 
 
 PARSERS = {"woda": (water.parse_text, water.parse_items), "gaz": (gas_pdf.parse_text, gas_pdf.parse_items),
-           "prad": (enea_pdf.parse_text, enea_pdf.parse_items), "paliwo": (fuel_pdf.parse_text, fuel_pdf.parse_items)}
+           "prad": (enea_pdf.parse_text, enea_pdf.parse_items_safe), "paliwo": (fuel_pdf.parse_text, fuel_pdf.parse_items)}
 
 
 def reparse_all(utility=None, progress=None):
@@ -157,7 +159,8 @@ def reparse_all(utility=None, progress=None):
                           [utility, utility]).fetchall()
     for n, b in enumerate(bills, 1):
         path = Path(b["pdf_path"])
-        row = {"Plik": path.name, "Dostawca": b["provider"], "Numer": b["invoice_no"] or "", "Kwota": "", "Okres": "", "Wynik": ""}
+        row = {"Plik": path.name, "Dostawca": b["provider"], "Numer": b["invoice_no"] or "", "Kwota": "", "Okres": "",
+               "Zużycie": "", "Wynik": ""}
         rows.append(row)
         try:
             _reparse_one(b, path, row)
@@ -180,19 +183,23 @@ def _reparse_one(b, path, row):
         return
     fields.pop("invoice_no", None)
     fields.pop("note", None)
+    dropped = bool(items) and not water.items_consistent(items, fields.get("amount_gross"))
+    if dropped:          # niespójne pozycje (suma różna od kwoty faktury) zaniżałyby statystyki: lepiej brak podziału
+        items = []
     db.fill_missing(b["id"], fields, overwrite=True)
-    if items:
-        db.replace_items(b["id"], items)
+    db.replace_items(b["id"], items)
+    row["Zużycie"] = f"{fields['consumption']:g} {fields.get('unit') or ''}".strip() if "consumption" in fields else ""
     row["Kwota"] = f"{fields['amount_gross']:.2f}" if "amount_gross" in fields else ""
     row["Okres"] = f"{fields['period_start']} – {fields['period_end']}" if "period_start" in fields else ""
     notes = [f"pozycji: {len(items)}"]
     if "account_balance" in fields:
         notes.append(f"stan konta: {fields['account_balance']:.2f} zł")
-    total, amount = sum(i["amount_gross"] for i in items), fields.get("amount_gross")
-    if not items and b["utility"] != "paliwo":
+    if dropped:
+        notes.append("POMINIĘTO POZYCJE: suma nie zgadza się z kwotą (inny układ PDF)")
+    elif not items and b["utility"] != "paliwo":
         notes.append("BRAK POZYCJI (inny układ PDF?)")
-    elif items and amount is not None and abs(total - amount) > 0.01 * len(items) + 0.03:
-        notes.append(f"UWAGA: suma pozycji {total:.2f} ≠ kwota {amount:.2f}")
+    elif any(i["kind"] == "dystrybucja" for i in items):
+        notes.append("podział zbiorczy: energia i dystrybucja")
     if "amount_gross" not in fields:
         notes.append("BRAK KWOTY")
     row["Wynik"] = ", ".join(notes)

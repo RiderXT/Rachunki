@@ -167,6 +167,16 @@ def parse_items(text):
     return items
 
 
+def items_consistent(items, amount):
+    """Czy suma pozycji (brutto) zgadza się z kwotą faktury (z tolerancją na zaokrąglenia). Bez kwoty: nie da się
+    sprawdzić, więc pozycje uznajemy za wiarygodne."""
+    if not items:
+        return False
+    if amount is None:
+        return True
+    return abs(sum(i["amount_gross"] for i in items) - amount) <= 0.01 * len(items) + 0.03
+
+
 def check_items(items, amount, label=""):
     if items and amount is not None and abs(sum(i["amount_gross"] for i in items) - amount) > 0.05:
         log.warning("%s suma pozycji %.2f != kwota faktury %.2f", label, sum(i["amount_gross"] for i in items), amount)
