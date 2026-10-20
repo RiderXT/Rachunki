@@ -47,6 +47,27 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   next_date TEXT,                             -- data jednej z płatności (program sam liczy najbliższą)
   active INTEGER NOT NULL DEFAULT 1,
   note TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  category TEXT NOT NULL DEFAULT 'sub',       -- sub (subskrypcje) | periodic (koszty roczne/okresowe)
+  saved REAL NOT NULL DEFAULT 0               -- ile już odłożono (koszty okresowe)
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_marks (    -- zaznaczenia "zapłacone" w karcie miesiąca
+  month TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  paid INTEGER NOT NULL DEFAULT 0,
+  paid_date TEXT,
+  PRIMARY KEY (month, item_key)
+);
+CREATE TABLE IF NOT EXISTS manual_items (     -- własne pozycje miesiąca (np. czynsz, rata)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT NOT NULL,
+  name TEXT NOT NULL,
+  amount REAL NOT NULL,
+  note TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS processed_mail (
@@ -65,6 +86,7 @@ FIELDS = ["provider", "utility", "invoice_no", "issue_date", "period_start",
 NEW_COLUMNS = {  # kolumny dodane po pierwszym wydaniu: dopisywane do istniejących baz
     "bills": [("account_balance", "REAL"), ("note", "TEXT")],
     "bill_items": [("unit_price", "REAL"), ("amount_net", "REAL"), ("vat_rate", "REAL")],
+    "subscriptions": [("category", "TEXT NOT NULL DEFAULT 'sub'"), ("saved", "REAL NOT NULL DEFAULT 0")],
 }
 
 
@@ -193,3 +215,17 @@ def fill_missing(bill_id, fields, overwrite=False):
         upd["status"] = compute_status(merged)
         c.execute(f"UPDATE bills SET {', '.join(f'{k}=?' for k in upd)} WHERE id=?", [*upd.values(), bill_id])
     return [k for k in upd if k != "status"]
+
+
+def get_setting(key, default=None):
+    import json
+    with conn() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", [key]).fetchone()
+    return json.loads(row["value"]) if row else default
+
+
+def set_setting(key, value):
+    import json
+    with conn() as c:
+        c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  [key, json.dumps(value)])

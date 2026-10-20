@@ -1,13 +1,13 @@
 import hmac
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from app import db, invoices, stats, subscriptions
+from app import checklist, db, fuel_manual, invoices, stats, subscriptions
 from app.version import VERSION
 
 st.set_page_config(page_title="Rachunki domowe", layout="wide")
@@ -63,13 +63,28 @@ with db.conn() as c:
     bills = stats.load_bills(c)
     water_daily = stats.water_daily(c, bills)
     water_price = stats.water_price_series(c, bills)
-subs = subscriptions.load()
+subs_all = subscriptions.load()
+subs = subs_all[subs_all["category"] == "sub"].reset_index(drop=True)              # subskrypcje
+periodic = subs_all[subs_all["category"] == "periodic"].reset_index(drop=True)     # koszty roczne i okresowe
 sub_sum = subscriptions.summary(subs)
+per_table = subscriptions.periodic_table(periodic)
+per_sum = subscriptions.periodic_summary(per_table)
 water_bills = bills[bills["utility"] == "woda"]
 water_done = stats.complete_months(water_bills) if not water_bills.empty else []
 
 sav = stats.suggested_savings(bills) if not bills.empty else None
 suggested = float(sav[sav["utility"] != "paliwo"]["per_month"].sum()) if sav is not None else 0.0
+
+# okno statystyk paliwa (ustawiane w zakładce Paliwo) wyznacza też średnią w "Statystykach" i "Subskrypcjach"
+fuel_cfg = db.get_setting("fuel_period", stats.DEFAULT_FUEL_CFG)
+fuel_start, fuel_end = stats.fuel_window(fuel_cfg)
+fuel_now = stats.fuel_stats(bills, fuel_start, fuel_end) if not bills.empty else None
+if sav is not None and fuel_now and fuel_now["avg_month"] is not None:
+    sav["months_used"] = sav["months_used"].astype(float)
+    _i = sav.index[sav["utility"] == "paliwo"][0]
+    sav.loc[_i, "months_used"] = round(fuel_now["days"] / stats.DAYS_PER_MONTH, 1)
+    sav.loc[_i, "last_sum"] = fuel_now["cost"]
+    sav.loc[_i, "per_month"] = fuel_now["avg_month"]
 
 st.sidebar.header("Skarbonka")
 contribution = st.sidebar.number_input("Miesięczna wpłata (zł)", min_value=0.0, step=10.0,
@@ -92,9 +107,10 @@ if not bills.empty:
                    "Uzupełnij je w zakładce „Lista” albo wgraj PDF faktury w zakładce „Wgraj PDF”. "
                    "Bez okresu kwota liczona jest do miesiąca wystawienia, bez kwoty faktura jest pomijana.")
 
-t_stats, t_water, t_gas, t_power, t_fuel, t_subs, t_files, t_upload, t_add, t_csv, t_list = st.tabs(
-    ["Statystyki", "Woda", "Gaz", "Prąd", "Paliwo", "Subskrypcje", "Faktury PDF", "Wgraj PDF", "Dodaj fakturę",
-     "Import CSV", "Lista"])
+(t_stats, t_month, t_water, t_gas, t_power, t_fuel, t_subs, t_periodic,
+ t_files, t_upload, t_add, t_csv, t_list) = st.tabs(
+    ["Statystyki", "Miesiąc", "Woda", "Gaz", "Prąd", "Paliwo", "Subskrypcje", "Koszty roczne", "Faktury PDF",
+     "Wgraj PDF", "Dodaj fakturę", "Import CSV", "Lista"])
 
 with t_stats:
     if bills.empty:
@@ -105,24 +121,16 @@ with t_stats:
         m2.metric("Koszt z użytych miesięcy (media)",
                   fmt(float(sav[sav["utility"] != "paliwo"]["last_sum"].sum())))
         _fuel = sav[sav["utility"] == "paliwo"].iloc[0]
-        m3.metric("Paliwo średnio / miesiąc", fmt(float(_fuel["per_month"])) if _fuel["months_used"] else "brak danych")
+        m3.metric("Paliwo średnio / miesiąc", fmt(float(_fuel["per_month"])) if _fuel["months_used"] else "brak danych",
+                  help=f"Okres: {stats.fuel_window_label(fuel_cfg)} (zmienisz w zakładce Paliwo).")
         m4.metric("Liczba faktur", len(bills))
-        if not subs.empty:
-            sb1, sb2 = st.columns(2)
+        if not subs.empty or not periodic.empty:
+            sb1, sb2, sb3 = st.columns(3)
             sb1.metric("Subskrypcje / miesiąc", fmt2(sub_sum["monthly"]))
-            sb2.metric("Stałe wydatki (media + subskrypcje) / miesiąc", fmt2(suggested + sub_sum["monthly"]),
-                       help="Media: średnia z ostatnich 12 pełnych miesięcy. Szczegóły w zakładce „Subskrypcje”.")
-
-        table = pd.DataFrame({
-            "Medium": sav["utility"].map(LABEL),
-            "Miesięcy w średniej": sav["months_used"],
-            "Średnio / miesiąc (zł)": sav["per_month"].round(2),
-            "Suma z tych miesięcy (zł)": sav["last_sum"].round(2),
-        })
-        st.dataframe(table, hide_index=True)
-        st.caption("Średnia z maks. 12 ostatnich miesięcy w pełni pokrytych fakturami. "
-                   "Faktury są rozkładane na dni swojego okresu rozliczeniowego.")
-
+            sb2.metric("Koszty roczne: odkładaj / miesiąc", fmt2(per_sum["monthly"]),
+                       help="OC, przeglądy, ubezpieczenia itp. przeliczone na miesiąc. Szczegóły w zakładce „Koszty roczne”.")
+            sb3.metric("Stałe wydatki / miesiąc", fmt2(suggested + sub_sum["monthly"] + per_sum["monthly"]),
+                       help="Media (średnia z ostatnich 12 pełnych miesięcy) + subskrypcje + koszty roczne.")
         for _u, _owner in (("gaz", "PGNiG"), ("prad", "Enei")):
             _hist = stats.balance_history(bills, _u)
             if not _hist.empty:
@@ -298,71 +306,111 @@ with t_power:
 
 with t_fuel:
     fb = stats.fuel_bills(bills)
+    kinds_labels = list(stats.FUEL_KINDS.values())
+    kind_by_label = {v: k for k, v in stats.FUEL_KINDS.items()}
+    with st.expander("Dodaj tankowanie ręcznie (płatność przy kasie, bez faktury)", expanded=fb.empty):
+        with st.form("add_refuel", clear_on_submit=True):
+            r1, r2, r3 = st.columns(3)
+            f_day = r1.date_input("Data tankowania", value=date.today())
+            _dk = stats.FUEL_KINDS.get(fuel_manual.last_kind(), kinds_labels[0])
+            f_kind = r2.selectbox("Paliwo", kinds_labels, index=kinds_labels.index(_dk))
+            f_station = r3.text_input("Stacja (opcjonalnie)")
+            r4, r5, r6 = st.columns(3)
+            f_liters = r4.number_input("Litry", min_value=0.0, step=0.5, format="%.2f")
+            f_price = r5.number_input("Cena za litr (zł)", min_value=0.0, step=0.01, format="%.2f")
+            f_total = r6.number_input("Kwota razem (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f",
+                                      help="Zostaw 0, a kwota wyniesie litry × cena za litr. Wpisz, jeśli paragon pokazuje inną.")
+            if st.form_submit_button("Dodaj tankowanie"):
+                try:
+                    _ok, _amount = fuel_manual.add_refuel(f_day, f_liters, f_price, f_total, kind_by_label[f_kind], f_station)
+                    st.session_state["flash"] = f"Dodano tankowanie: {fmt2(_amount)} ({f_liters:g} l)."
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
     if fb.empty:
-        st.info("Brak faktur za paliwo. Włącz powiadomienia ORLEN Pay (FUEL_SENDER w .env) albo wgraj faktury "
-                "w zakładce „Wgraj PDF”.")
+        st.info("Brak tankowań. Dodaj pierwsze powyżej, włącz powiadomienia ORLEN Pay (FUEL_SENDER w .env) albo wgraj "
+                "faktury w zakładce „Wgraj PDF”.")
     else:
-        fmonths = stats.fuel_months(bills)
-        months = []
-        if not fmonths:
-            st.info("Pierwsze zakupy są z bieżącego miesiąca: statystyki okresowe pojawią się po jego zakończeniu.")
+        presets = {"Ostatni miesiąc": {"mode": "months", "n": 1}, "Ostatnie 2 miesiące": {"mode": "months", "n": 2},
+                   "Ostatnie 3 miesiące": {"mode": "months", "n": 3}, "Ostatnie 6 miesięcy": {"mode": "months", "n": 6},
+                   "Ostatnie 12 miesięcy": {"mode": "months", "n": 12}, "Ostatnie 30 dni": {"mode": "days", "n": 30}}
+        years = sorted({int(y) for y in fb["issue_date"].dt.year}, reverse=True)
+        options = list(presets) + ["Od wybranej daty"] + [f"Rok {y}" for y in years]
+
+        def _save_fuel_cfg():
+            label = st.session_state["fuel_period_sel"]
+            if label in presets:
+                cfg = presets[label]
+            elif label == "Od wybranej daty":
+                since = st.session_state.get("fuel_since") or (date.today() - timedelta(days=30))
+                cfg = {"mode": "since", "since": str(since)}
+            else:
+                cfg = {"mode": "year", "year": int(label.split()[1])}
+            db.set_setting("fuel_period", cfg)
+
+        cur_label = stats.fuel_window_label(fuel_cfg)
+        st.selectbox("Okres statystyk paliwa", options, index=options.index(cur_label) if cur_label in options else 4,
+                     key="fuel_period_sel", on_change=_save_fuel_cfg,
+                     help="To samo ustawienie określa średnią wydatków na paliwo w „Statystykach” i „Subskrypcjach”. "
+                          "Jest zapamiętywane.")
+        if fuel_cfg.get("mode") == "since":
+            st.date_input("Od dnia", value=pd.Timestamp(fuel_cfg["since"]).date(), key="fuel_since", on_change=_save_fuel_cfg)
+
+        if not fuel_now or fuel_now["avg_month"] is None:
+            st.info("W wybranym okresie nie ma jeszcze danych (okno zaczyna się przed pierwszym zakupem lub jest puste).")
         else:
-            years = sorted({m.year for m in fmonths}, reverse=True)
-            choice = st.selectbox("Okres", ["Ostatnie 12 miesięcy"] + [f"Rok {y}" for y in years], key="period_fuel")
-            months = fmonths[-12:] if choice.startswith("Ostatnie") else \
-                [m for m in fmonths if m.year == int(choice.split()[1])]
-            summ = stats.fuel_summary(bills, months)
-            st.caption(f"Pełne miesiące w okresie: {len(months)} ({months[0]} – {months[-1]}). Miesiąc bez tankowania "
-                       f"liczy się jako zero. Dane są od pierwszej faktury ({fb['issue_date'].min():%Y-%m-%d}).")
+            st.caption(f"Okres: {fuel_now['start']:%Y-%m-%d} – {fuel_now['end']:%Y-%m-%d}; do średniej liczone jest "
+                       f"{fuel_now['days']} dni (od {fuel_now['eff_start']:%Y-%m-%d}, bo pierwszy zakup to "
+                       f"{fuel_now['first']:%Y-%m-%d}). Średnia miesięczna = koszt ÷ dni × 30,44.")
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Koszt paliwa", fmt(summ["cost"]))
-            k2.metric("Tankowań", summ["refuels"])
-            k3.metric("Średnio / tankowanie", fmt(summ["avg_refuel"]))
-            k4.metric("Średnio / miesiąc", fmt(summ["avg_month"]))
-            if summ["liters"]:
+            k1.metric("Koszt paliwa", fmt2(fuel_now["cost"]))
+            k2.metric("Tankowań", fuel_now["refuels"])
+            k3.metric("Średnio / tankowanie", fmt2(fuel_now["avg_refuel"]))
+            k4.metric("Średnio / miesiąc", fmt2(fuel_now["avg_month"]))
+            if fuel_now["liters"]:
                 l1, l2 = st.columns(2)
-                l1.metric("Litry", f"{summ['liters']:,.0f} l".replace(",", " "))
-                l2.metric("Średnia cena za litr", f"{summ['price_per_l']:.2f} zł".replace(".", ","))
+                l1.metric("Litry", f"{fuel_now['liters']:,.0f} l".replace(",", " "))
+                l2.metric("Średnia cena za litr", f"{fuel_now['price_per_l']:.2f} zł".replace(".", ","))
             with db.conn() as fc_:
-                kinds = stats.fuel_by_kind(fc_, bills, months)
+                kinds = stats.fuel_by_kind_in(fc_, bills, fuel_now)
             if not kinds.empty:
                 st.subheader("Wg rodzaju paliwa")
                 kk = kinds.rename(index=lambda k: stats.FUEL_KINDS.get(k, k))
                 st.dataframe(pd.DataFrame({"Litry": kk["liters"].round(1), "Koszt (zł)": kk["cost"].round(2)}))
 
             st.subheader("Rok do roku")
-            cmp_, n_common = stats.fuel_compare(bills, months, fmonths)
-            if not cmp_:
-                st.info("Za mało danych do porównania: potrzebne są te same miesiące z poprzedniego roku.")
+            prev = stats.fuel_stats_prev_year(bills, fuel_start, fuel_end)
+            if not prev or not prev["days"]:
+                st.info("Za mało danych do porównania: sprzed roku nie ma jeszcze zakupów w tym samym oknie.")
             else:
-                st.caption(f"Porównanie na {n_common} wspólnych miesiącach (te same miesiące rok wcześniej).")
-                now, before = cmp_["now"], cmp_["before"]
                 chg = lambda a, b: round((a / b - 1) * 100, 1) if b else None  # noqa: E731
                 st.dataframe(pd.DataFrame({
-                    "Teraz": [round(now["cost"], 2), now["refuels"], round(now["liters"], 1)],
-                    "Rok wcześniej": [round(before["cost"], 2), before["refuels"], round(before["liters"], 1)],
-                    "Zmiana (%)": [chg(now["cost"], before["cost"]), chg(now["refuels"], before["refuels"]),
-                                   chg(now["liters"], before["liters"])]},
-                    index=["Koszt (zł)", "Tankowań", "Litry"]))
+                    "Teraz": [round(fuel_now["avg_month"], 2), fuel_now["refuels"], round(fuel_now["liters"], 1)],
+                    f"Rok wcześniej ({prev['start']:%Y-%m-%d} – {prev['end']:%Y-%m-%d})": [
+                        round(prev["avg_month"], 2), prev["refuels"], round(prev["liters"], 1)],
+                    "Zmiana (%)": [chg(fuel_now["avg_month"], prev["avg_month"]), chg(fuel_now["refuels"], prev["refuels"]),
+                                   chg(fuel_now["liters"], prev["liters"])]},
+                    index=["Średnio / miesiąc (zł)", "Tankowań", "Litry"]))
 
             st.subheader("Koszt miesięczny (zł)")
-            mm = stats.fuel_monthly(bills, months)
+            mm = stats.fuel_monthly_in(fuel_now)
             mm.index = mm.index.to_timestamp()
             st.bar_chart(mm[["cost"]].rename(columns={"cost": "Paliwo (zł)"}))
+            st.caption("Pierwszy i ostatni miesiąc okna mogą być niepełne.")
 
-        st.subheader("Tankowania")
-        shown = fb[fb["issue_date"].dt.to_period("M").isin(months)] if months else fb
-        shown = shown.sort_values("issue_date", ascending=False)
-        st.dataframe(pd.DataFrame({
-            "Data": shown["issue_date"].dt.strftime("%Y-%m-%d"), "Stacja": shown["note"],
-            "Kwota (zł)": shown["amount_gross"], "Litry": shown["consumption"].where(shown["consumption"] > 0),
-            "Cena za litr (zł)": (shown["amount_gross"] / shown["consumption"]).where(shown["consumption"] > 0).round(3),
-            "Numer faktury": shown["invoice_no"]}), hide_index=True)
+            st.subheader("Tankowania w okresie")
+            shown = fuel_now["bills"].sort_values("issue_date", ascending=False)
+            st.dataframe(pd.DataFrame({
+                "Data": shown["issue_date"].dt.strftime("%Y-%m-%d"), "Opis": shown["note"],
+                "Kwota (zł)": shown["amount_gross"], "Litry": shown["consumption"].where(shown["consumption"] > 0),
+                "Cena za litr (zł)": (shown["amount_gross"] / shown["consumption"]).where(shown["consumption"] > 0).round(3),
+                "Faktura": shown["invoice_no"].fillna("ręcznie")}), hide_index=True)
 
 with t_subs:
     st.write("Aktualne subskrypcje i inne stałe opłaty (np. Spotify, HBO, abonament telefoniczny). "
              "Płatności roczne i kwartalne są przeliczane na miesiąc.")
-    cyc_labels = list(subscriptions.CYCLES.values())
+    cyc_labels = [subscriptions.CYCLES[k] for k in subscriptions.SUB_CYCLES]
     cyc_by_label = {v: k for k, v in subscriptions.CYCLES.items()}
     k1, k2, k3 = st.columns(3)
     k1.metric("Subskrypcje / miesiąc", fmt2(sub_sum["monthly"]))
@@ -430,9 +478,10 @@ with t_subs:
     st.subheader("Stałe wydatki razem")
     fuel_avg = float(sav.loc[sav["utility"] == "paliwo", "per_month"].iloc[0]) if sav is not None else 0.0
     with_fuel = st.checkbox("Wlicz średnie miesięczne wydatki na paliwo", value=False, key="subs_with_fuel")
-    parts = [("Subskrypcje", sub_sum["monthly"]), ("Media (średnia z ostatnich 12 pełnych miesięcy)", suggested)]
+    parts = [("Subskrypcje", sub_sum["monthly"]), ("Koszty roczne i okresowe (rata miesięczna)", per_sum["monthly"]),
+             ("Media (średnia z ostatnich 12 pełnych miesięcy)", suggested)]
     if with_fuel:
-        parts.append(("Paliwo (średnia miesięczna)", fuel_avg))
+        parts.append((f"Paliwo (średnia: {stats.fuel_window_label(fuel_cfg).lower()})", fuel_avg))
     grand = sum(v for _, v in parts)
     st.dataframe(pd.DataFrame({
         "Pozycja": [n for n, _ in parts] + ["Razem"],
@@ -446,6 +495,174 @@ with t_subs:
         st.dataframe(pd.DataFrame({"Data": up["date"].dt.strftime("%Y-%m-%d"), "Subskrypcja": up["name"],
                                    "Kwota (zł)": up["amount"]}), hide_index=True)
         st.caption(f"Razem w ciągu 30 dni: {fmt2(float(up['amount'].sum()))}")
+
+with t_periodic:
+    st.write("Koszty, które wracają rzadziej niż co miesiąc: OC, przegląd, ubezpieczenia, podatki, opony. Program liczy, "
+             "ile odkładać miesięcznie, żeby w dniu płatności mieć pieniądze, i ile powinno być już odłożone dziś "
+             "(przy równym odkładaniu od poprzedniej płatności).")
+    pcyc_labels = [subscriptions.CYCLES[k] for k in subscriptions.PERIODIC_CYCLES]
+    pcyc_by_label = {v: k for k, v in subscriptions.CYCLES.items()}
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Odkładaj miesięcznie", fmt2(per_sum["monthly"]),
+              help="Suma rat: kwota podzielona przez długość cyklu (np. OC 1200 zł rocznie = 100 zł miesięcznie).")
+    p2.metric("Powinno być już odłożone", fmt(per_sum["target_now"]))
+    p3.metric("Wpisane jako odłożone", fmt(per_sum["saved"]))
+    p4.metric("Różnica", f"{per_sum['saved'] - per_sum['target_now']:+,.0f} zł".replace(",", " "),
+              help="Plus: masz więcej niż trzeba, minus: brakuje.")
+
+    with st.form("add_periodic", clear_on_submit=True):
+        q1, q2 = st.columns(2)
+        pr_name = q1.text_input("Nazwa (np. OC samochodu)")
+        pr_amount = q2.number_input("Kwota jednej płatności (zł)", min_value=0.0, step=10.0, format="%.2f")
+        q3, q4, q5 = st.columns(3)
+        pr_cycle = q3.selectbox("Jak często", pcyc_labels, index=pcyc_labels.index("rocznie"))
+        pr_next = q4.date_input("Najbliższy termin płatności", value=None,
+                                help="Bez daty program nie policzy, ile odłożyć do terminu.")
+        pr_saved = q5.number_input("Już odłożono (zł)", min_value=0.0, step=10.0, format="%.2f")
+        pr_note = st.text_input("Notatka (opcjonalnie)")
+        if st.form_submit_button("Dodaj koszt"):
+            try:
+                subscriptions.add(pr_name, pr_amount, pcyc_by_label[pr_cycle], pr_next, pr_note,
+                                  category="periodic", saved=pr_saved)
+                st.session_state["flash"] = f"Dodano koszt okresowy: {pr_name.strip()}."
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    if not periodic.empty:
+        st.subheader("Plan odkładania")
+        plan = per_table.copy()
+        st.dataframe(pd.DataFrame({
+            "Koszt": plan["name"], "Termin": plan["next_due"].dt.strftime("%Y-%m-%d"), "Dni do terminu": plan["days_left"],
+            "Kwota (zł)": plan["amount"], "Odłożono (zł)": plan["saved"],
+            "Powinno być (zł)": plan["target_now"].round(2), "Różnica (zł)": plan["diff"].round(2),
+            "Rata miesięczna (zł)": plan["monthly"].round(2), "Odkładaj do terminu (zł/mies.)": plan["to_goal"].round(2)}),
+            hide_index=True)
+        st.caption("„Rata miesięczna” to kwota podzielona przez długość cyklu. „Odkładaj do terminu” to brakująca kwota "
+                   "podzielona przez liczbę miesięcy do terminu (gdy już coś odłożono lub termin jest blisko, jest inna "
+                   "niż rata).")
+
+        st.subheader("Lista")
+        full = subscriptions.periodic_table(periodic.assign(active=True)).set_index("id")
+        ptable = pd.DataFrame({
+            "Usuń": False, "Aktywna": periodic["active"], "Nazwa": periodic["name"], "Kwota (zł)": periodic["amount"],
+            "Jak często": periodic["cycle"].map(subscriptions.CYCLES),
+            "Następny termin": periodic["next_date"].apply(lambda d: d.date() if pd.notna(d) else None),
+            "Odłożono (zł)": periodic["saved"], "Notatka": periodic["note"].fillna(""),
+            "Na miesiąc (zł)": [round(full.loc[i, "monthly"], 2) for i in periodic["id"]],
+            "Dni do terminu": [full.loc[i, "days_left"] for i in periodic["id"]]})
+        pedit = st.data_editor(
+            ptable, hide_index=True, key="periodic_editor", disabled=["Na miesiąc (zł)", "Dni do terminu"],
+            column_config={
+                "Usuń": st.column_config.CheckboxColumn("Usuń"), "Aktywna": st.column_config.CheckboxColumn("Aktywna"),
+                "Kwota (zł)": st.column_config.NumberColumn("Kwota (zł)", min_value=0.0, step=1.0, format="%.2f"),
+                "Jak często": st.column_config.SelectboxColumn("Jak często", options=pcyc_labels, required=True),
+                "Następny termin": st.column_config.DateColumn("Następny termin"),
+                "Odłożono (zł)": st.column_config.NumberColumn("Odłożono (zł)", min_value=0.0, step=1.0, format="%.2f")})
+        st.caption("Po wykonaniu płatności zmień „Następny termin” na kolejny i wyzeruj „Odłożono”. "
+                   "Odznacz „Aktywna”, żeby wstrzymać koszt bez usuwania.")
+        if st.button("Zapisz zmiany", key="save_periodic"):
+            errors, changed = [], 0
+            cols = ["Aktywna", "Nazwa", "Kwota (zł)", "Jak często", "Następny termin", "Odłożono (zł)", "Notatka"]
+            for sid, (_, old), new in zip(periodic["id"], ptable.iterrows(), pedit.to_dict("records")):
+                if new["Usuń"]:
+                    subscriptions.delete(int(sid))
+                    changed += 1
+                    continue
+                if all(clean(old[c]) == clean(new[c]) for c in cols):
+                    continue
+                try:
+                    subscriptions.update(int(sid), name=new["Nazwa"], amount=new["Kwota (zł)"],
+                                         cycle=pcyc_by_label[new["Jak często"]], next_date=new["Następny termin"],
+                                         active=new["Aktywna"], saved=new["Odłożono (zł)"], note=new["Notatka"])
+                    changed += 1
+                except ValueError as e:
+                    errors.append(f"{new['Nazwa'] or '(bez nazwy)'}: {e}")
+            if errors:
+                st.error("; ".join(errors))
+            st.session_state["flash"] = f"Zapisano zmian: {changed}."
+            if not errors:
+                st.rerun()
+
+with t_month:
+    st.write("Wszystkie koszty miesiąca w jednym miejscu: faktury za media (a gdy faktury jeszcze nie ma, szacunek ze średniej), "
+             "subskrypcje, koszty okresowe i własne pozycje. Zaznacz „Zapłacone” po opłaceniu i zapisz.")
+    cur_m = pd.Period(pd.Timestamp.today(), "M")
+    month_opts = {f"{m}" + (" (bieżący)" if m == cur_m else ""): m for m in pd.period_range(cur_m - 6, cur_m + 2, freq="M")}
+    month = month_opts[st.selectbox("Miesiąc", list(month_opts), index=list(month_opts.values()).index(cur_m), key="month_sel")]
+    estimates = {u: float(sav.loc[sav["utility"] == u, "per_month"].iloc[0]) for u in ("prad", "gaz", "woda")} \
+        if sav is not None else {}
+    track_start = checklist.tracking_start()
+    mrows = checklist.build(month, bills, subs_all, estimates)
+    mt = checklist.totals(mrows)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Razem w miesiącu", fmt2(mt["total"]), help=f"{mt['n']} pozycji")
+    c2.metric("Zapłacone", fmt2(mt["paid"]), help=f"{mt['n_paid']} pozycji")
+    c3.metric("Zostało do zapłacenia", fmt2(mt["left"]), help=f"{mt['n_left']} pozycji")
+    st.progress(min(1.0, mt["paid"] / mt["total"]) if mt["total"] else 0.0,
+                text=f"Zapłacono {mt['n_paid']} z {mt['n']} pozycji")
+
+    unpaid = checklist.unpaid_previous(month, bills, subs_all, estimates, start=track_start)
+    if not unpaid.empty:
+        st.warning(f"Niezapłacone z poprzednich miesięcy: {len(unpaid)} pozycji na {fmt2(float(unpaid['amount'].sum()))}. "
+                   "Przełącz miesiąc, żeby je zaznaczyć jako zapłacone.")
+        with st.expander("Pokaż niezapłacone z poprzednich miesięcy"):
+            st.dataframe(pd.DataFrame({"Miesiąc": unpaid["month"], "Pozycja": unpaid["name"],
+                                       "Kwota (zł)": unpaid["amount"], "Uwagi": unpaid["detail"]}), hide_index=True)
+
+    if mrows.empty:
+        st.info("Brak pozycji w tym miesiącu. Dodaj własną poniżej albo dodaj subskrypcje i koszty okresowe.")
+    else:
+        mview = pd.DataFrame({
+            "Zapłacone": mrows["paid"], "Pozycja": mrows["name"], "Typ": mrows["kind"], "Kwota (zł)": mrows["amount"],
+            "Data": mrows["due"].apply(lambda d: d.date() if pd.notna(d) else None), "Uwagi": mrows["detail"],
+            "Zapłacono dnia": mrows["paid_date"].fillna(""), "Usuń": False})
+        medit = st.data_editor(
+            mview, hide_index=True, key=f"month_editor_{month}",
+            disabled=["Pozycja", "Typ", "Kwota (zł)", "Data", "Uwagi", "Zapłacono dnia"],
+            column_config={"Zapłacone": st.column_config.CheckboxColumn("Zapłacone"),
+                           "Kwota (zł)": st.column_config.NumberColumn("Kwota (zł)", format="%.2f"),
+                           "Data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
+                           "Usuń": st.column_config.CheckboxColumn("Usuń", help="Dotyczy tylko własnych pozycji.")})
+        st.caption("Szacunek to średni miesięczny koszt z faktur: zastąpi go faktura po pobraniu. Przy fakturze za gaz lub "
+                   "prąd „po rozliczeniu: nadpłata” oznacza, że u dostawcy jest nadpłata i nic nie trzeba dopłacać "
+                   "(takie faktury nie trafiają do zaległych).")
+        if st.button("Zapisz zaznaczenia", key="save_month", type="primary"):
+            changed = 0
+            for key, was, new in zip(mrows["key"], mrows["paid"], medit.to_dict("records")):
+                if new["Usuń"] and key.startswith("man:"):
+                    checklist.delete_manual(int(key.split(":")[1]))
+                    changed += 1
+                elif bool(new["Zapłacone"]) != bool(was):
+                    checklist.set_paid(month, key, bool(new["Zapłacone"]))
+                    changed += 1
+            st.session_state["flash"] = f"Zapisano zmian: {changed}."
+            st.rerun()
+
+    with st.expander("Dodaj własną pozycję do tego miesiąca (np. czynsz, rata, telefon)"):
+        with st.form(f"add_manual_{month}", clear_on_submit=True):
+            mm1, mm2, mm3 = st.columns(3)
+            mi_name = mm1.text_input("Nazwa")
+            mi_amount = mm2.number_input("Kwota (zł)", min_value=0.0, step=10.0, format="%.2f")
+            mi_note = mm3.text_input("Notatka (opcjonalnie)")
+            if st.form_submit_button("Dodaj pozycję"):
+                try:
+                    checklist.add_manual(month, mi_name, mi_amount, mi_note)
+                    st.session_state["flash"] = f"Dodano pozycję: {mi_name.strip()}."
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+        st.caption("Pozycje stałe co miesiąc dodaj lepiej w zakładce „Subskrypcje”: będą się pojawiać same.")
+
+    with st.expander("Od kiedy liczyć zaległości"):
+        st.write(f"Zaległości (niezapłacone z poprzednich miesięcy) liczą się od miesiąca **{track_start}**. "
+                 "Starsze faktury nie są wtedy uznawane za niezapłacone.")
+        new_start = st.selectbox("Liczyć od miesiąca", list(pd.period_range(cur_m - 12, cur_m, freq="M"))[::-1],
+                                 format_func=str, key="track_start_sel")
+        if st.button("Zapisz", key="save_track_start"):
+            checklist.set_tracking_start(new_start)
+            st.session_state["flash"] = f"Zaległości będą liczone od {new_start}."
+            st.rerun()
 
 with t_files:
     if bills.empty:

@@ -15,7 +15,7 @@ RE_REFUND = re.compile(r"do\s+zwrotu\s+" + A, re.I)
 RE_PAY = re.compile(r"do\s+zap[łl]aty\s+" + A + r"\s*z[łl]", re.I)
 # wiersz pozycji: [strefa] jednostka [data] ilość cena_netto należność_netto VAT
 RE_ROW = re.compile(
-    r"(?<![\d,.])(?P<unit>kWh|zł/mc|mc|szt|kW)\s+(?:(?P<date>\d{2}\.\d{2}\.\d{4})\s+)?"
+    r"(?<![\d,.])(?P<unit>kWh|zł/mc|mc|szt|kW)\s+(?:(?P<date>\d{2}[./]\d{2}[./]\d{4})\s+)?"
     r"(?P<qty>\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d+)?|\d+(?:,\d+)?)\s+(?P<price>\d+,\d{2,5})\s+"
     r"(?P<net>-?\d[\d \u00a0]*,\d{2})\s+(?P<vat>\d{1,2})\s*$", re.I)
 NAME_KINDS = [("energia elektryczna", "energia"), ("opłata stała sieciowa", "dystr_stala"),
@@ -46,6 +46,8 @@ def parse_items(text):
         if m := RE_PERIOD.search(line):
             period = (w._iso(m.group(1)), w._iso(m.group(2)))
         row = RE_ROW.search(line)
+        if row and _kind(line[:row.start()].strip()):      # nazwa pozycji jest w tej samej linii co wartości
+            name = line[:row.start()].strip()
         if row and name:
             net, vat = w._num(row["net"]), float(row["vat"])
             unit = "kWh" if row["unit"].lower() == "kwh" else "mc" if "mc" in row["unit"].lower() else row["unit"].lower()

@@ -459,3 +459,90 @@ def items_coverage(conn, bills, utility):
     b["diff"] = b["total"] - b["amount_gross"]
     b["ok"] = (b["n"] > 0) & (b["diff"].abs() <= 0.01 * b["n"] + 0.03)
     return b.sort_values("issue_date", ascending=False).reset_index(drop=True)
+
+
+# ----------------------------------------------------------------------------------
+# Paliwo: ruchome okno czasowe statystyk (np. "ostatnie 2 miesiące", "od 1 września")
+# ----------------------------------------------------------------------------------
+DEFAULT_FUEL_CFG = {"mode": "months", "n": 12}
+DAYS_PER_MONTH = 30.4375
+
+
+def fuel_window(cfg=None, today=None):
+    """(początek, koniec) okna statystyk paliwa wg ustawienia. Tryby: months (n ostatnich pełnych miesięcy),
+    days (n ostatnich dni), since (od daty do dziś), year (rok kalendarzowy)."""
+    cfg = cfg or DEFAULT_FUEL_CFG
+    today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
+    mode = cfg.get("mode", "months")
+    if mode == "days":
+        return today - pd.Timedelta(days=int(cfg.get("n", 30)) - 1), today
+    if mode == "since" and cfg.get("since"):
+        return min(pd.Timestamp(cfg["since"]).normalize(), today), today
+    if mode == "year" and cfg.get("year"):
+        y = int(cfg["year"])
+        return pd.Timestamp(y, 1, 1), min(pd.Timestamp(y, 12, 31), today)
+    n = max(1, int(cfg.get("n", 12)))
+    return (today.to_period("M") - n).start_time, (today.to_period("M") - 1).end_time.normalize()
+
+
+def fuel_window_label(cfg=None):
+    cfg = cfg or DEFAULT_FUEL_CFG
+    mode = cfg.get("mode", "months")
+    if mode == "days":
+        return f"Ostatnie {cfg.get('n', 30)} dni"
+    if mode == "since":
+        return "Od wybranej daty"
+    if mode == "year":
+        return f"Rok {cfg.get('year')}"
+    n = int(cfg.get("n", 12))
+    return "Ostatni miesiąc" if n == 1 else f"Ostatnie {n} miesiące" if n in (2, 3, 4) else f"Ostatnie {n} miesięcy"
+
+
+def fuel_stats(bills, start, end):
+    """Statystyki zakupów paliwa w oknie [start, end]. Średnia miesięczna jest liczona z dni okna (koszt / dni x 30,44),
+    a okno jest skracane do daty pierwszego zakupu, żeby brak danych nie zaniżał średniej."""
+    allb = fuel_bills(bills)
+    if allb.empty:
+        return None
+    start, end = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
+    first = allb["issue_date"].min().normalize()
+    eff_start = max(start, first)
+    b = allb[(allb["issue_date"] >= eff_start) & (allb["issue_date"] <= end + pd.Timedelta(hours=23, minutes=59))]
+    days = (end - eff_start).days + 1 if end >= eff_start else 0
+    with_l = b[b["consumption"] > 0]
+    cost, refuels = float(b["amount_gross"].sum()), int(len(b))
+    liters = float(with_l["consumption"].sum())
+    return {"start": start, "end": end, "eff_start": eff_start, "days": days, "first": first,
+            "cost": cost, "refuels": refuels, "liters": liters,
+            "avg_refuel": cost / refuels if refuels else 0.0,
+            "avg_month": cost / days * DAYS_PER_MONTH if days > 0 else None,
+            "price_per_l": float(with_l["amount_gross"].sum()) / liters if liters else None, "bills": b}
+
+
+def fuel_stats_prev_year(bills, start, end):
+    """To samo okno rok wcześniej; None, gdy sprzed roku nie ma jeszcze danych (pierwszy zakup później niż początek okna)."""
+    allb = fuel_bills(bills)
+    if allb.empty:
+        return None
+    ps, pe = pd.Timestamp(start) - pd.DateOffset(years=1), pd.Timestamp(end) - pd.DateOffset(years=1)
+    if allb["issue_date"].min().normalize() > ps:
+        return None
+    return fuel_stats(bills, ps, pe)
+
+
+def fuel_monthly_in(stats_dict):
+    """Koszt i liczba tankowań wg miesięcy w oknie (miesiące bez zakupów = 0)."""
+    b = stats_dict["bills"]
+    months = pd.period_range(stats_dict["eff_start"].to_period("M"), stats_dict["end"].to_period("M"), freq="M")
+    g = b.groupby(b["issue_date"].dt.to_period("M")).agg(cost=("amount_gross", "sum"), refuels=("amount_gross", "size"))
+    return g.reindex(months, fill_value=0.0)
+
+
+def fuel_by_kind_in(conn, bills, stats_dict):
+    items = pd.read_sql_query("SELECT bill_id, kind, quantity, unit, amount_gross FROM bill_items WHERE meter='paliwo'", conn)
+    ids = set(stats_dict["bills"]["id"])
+    x = items[items["bill_id"].isin(ids)].copy()
+    if x.empty:
+        return pd.DataFrame(columns=["liters", "cost"])
+    x["liters"] = x["quantity"].where(x["unit"] == "l", 0.0)
+    return x.groupby("kind").agg(liters=("liters", "sum"), cost=("amount_gross", "sum")).sort_values("cost", ascending=False)

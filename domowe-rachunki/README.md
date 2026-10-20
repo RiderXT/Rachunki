@@ -129,7 +129,30 @@ Dla każdego maila pokaże datę, temat, liczbę załączników PDF, to, co odcz
 jest już w bazie. Jeśli `FUEL_SENDER` dopisano do `.env` po uruchomieniu usługi, odtwórz kontener, bo zmienne są
 czytane tylko przy jego tworzeniu: `docker compose up -d --force-recreate water-sync`. Dane można brać z samej
 treści maila albo z samego PDF-a, więc zmiana wyglądu maila przez ORLEN nie blokuje importu, o ile jest załącznik.
+**Okres statystyk** wybierasz w zakładce „Paliwo”: ostatni miesiąc, 2, 3, 6, 12 miesięcy, ostatnie 30 dni, rok albo „od
+wybranej daty”. Wybór jest zapamiętywany i określa też średnią paliwa w „Statystykach” oraz „Subskrypcjach”. Średnia
+miesięczna to koszt ÷ liczba dni okna × 30,44, a okno jest skracane do daty pierwszego zakupu. **Ręczne tankowanie**
+(płatność przy kasie, bez faktury): data, litry i cena za litr (kwota = litry × cena, albo wpisz kwotę z paragonu).
 Paliwo jest w statystykach osobno: „Odkładaj miesięcznie” dotyczy tylko mediów (prąd, gaz, woda).
+
+## Karta „Miesiąc”
+
+Wszystkie koszty miesiąca w jednym miejscu, z zaznaczaniem, co już zapłacono. Pozycje składają się same z: faktur
+za prąd, gaz i wodę wystawionych w tym miesiącu (a gdy faktury jeszcze nie ma: **szacunku** ze średniego kosztu,
+który zastąpi faktura po pobraniu), subskrypcji, kosztów okresowych przypadających w tym miesiącu (po dacie płatności)
+oraz własnych pozycji (np. czynsz, rata). Zaznaczasz „Zapłacone” i zapisujesz; zaznaczenia są zapamiętywane per pozycja
+i miesiąc. Na górze są sumy (razem, zapłacone, zostało) i pasek postępu. **Zaległe** to niezapłacone pozycje z poprzednich
+miesięcy, liczone od miesiąca rozpoczęcia śledzenia (domyślnie miesiąc pierwszego otwarcia karty, zmienisz w „Od kiedy
+liczyć zaległości”), bez szacunków i bez faktur, po których u dostawcy została nadpłata. Subskrypcje i koszty
+okresowe pojawiają się od miesiąca ich dodania.
+
+## Koszty roczne i okresowe
+
+Zakładka „Koszty roczne”: OC, przegląd, ubezpieczenia, podatki, opony itp. (co kwartał, pół roku, rok, 2 lub 3 lata).
+Dla każdego kosztu podajesz kwotę, częstotliwość, najbliższy termin i opcjonalnie, ile już odłożono. Program liczy:
+**ratę miesięczną** (kwota ÷ długość cyklu, to jest ile odkładać na stałe), **ile powinno być odłożone dziś** (przy równym
+odkładaniu od poprzedniej płatności), różnicę względem wpisanego oraz **ile odkładać do terminu**. Po płatności zmień termin
+na kolejny i wyzeruj „Odłożono”. Raty wchodzą do sumy „Stałe wydatki” w „Statystykach” i „Subskrypcjach”.
 
 ## Subskrypcje
 
