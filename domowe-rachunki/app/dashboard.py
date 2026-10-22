@@ -497,50 +497,102 @@ with t_subs:
         st.caption(f"Razem w ciągu 30 dni: {fmt2(float(up['amount'].sum()))}")
 
 with t_periodic:
-    st.write("Koszty, które wracają rzadziej niż co miesiąc: OC, przegląd, ubezpieczenia, podatki, opony. Program liczy, "
-             "ile odkładać miesięcznie, żeby w dniu płatności mieć pieniądze, i ile powinno być już odłożone dziś "
-             "(przy równym odkładaniu od poprzedniej płatności).")
+    st.write("Koszty, które wracają rzadziej niż co miesiąc: OC, przegląd, ubezpieczenia, podatki, opony. Wpisujesz "
+             "**jedną wspólną kwotę**, którą już odłożyłeś na takie wydatki, a program sprawdza każdy termin płatności "
+             "i wylicza, ile odkładać miesięcznie, żeby w dniu każdej płatności wystarczyło pieniędzy.")
     pcyc_labels = [subscriptions.CYCLES[k] for k in subscriptions.PERIODIC_CYCLES]
     pcyc_by_label = {v: k for k, v in subscriptions.CYCLES.items()}
+    pool_cfg = db.get_setting("periodic_pool", {"amount": 0.0, "as_of": None})
+    buffer_cfg = float(db.get_setting("periodic_buffer", 0.0))
+    horizon_cfg = int(db.get_setting("periodic_horizon", 12))
+    horizons = [6, 12, 18, 24, 36]
+
+    with st.form("periodic_settings"):
+        g1, g2, g3 = st.columns(3)
+        in_pool = g1.number_input("Odłożono na koszty roczne (zł)", min_value=0.0, step=50.0, format="%.2f",
+                                  value=float(pool_cfg["amount"]),
+                                  help="Jedna wspólna kwota: całe odłożone na te wydatki. Zaktualizuj ją od czasu do czasu, "
+                                       "np. po zapłaceniu kosztu lub po większej wpłacie.")
+        in_buffer = g2.number_input("Minimalny zapas (zł)", min_value=0.0, step=50.0, format="%.2f", value=buffer_cfg,
+                                    help="Ile ma zostać w funduszu po każdej płatności (poduszka bezpieczeństwa).")
+        in_horizon = g3.selectbox("Planuj na", horizons, index=horizons.index(horizon_cfg) if horizon_cfg in horizons else 1,
+                                  format_func=lambda n: f"{n} miesięcy")
+        if st.form_submit_button("Zapisz ustawienia planu"):
+            db.set_setting("periodic_pool", {"amount": float(in_pool), "as_of": date.today().isoformat()})
+            db.set_setting("periodic_buffer", float(in_buffer))
+            db.set_setting("periodic_horizon", int(in_horizon))
+            st.session_state["flash"] = "Zapisano ustawienia planu."
+            st.rerun()
+
+    pool = float(pool_cfg["amount"])
+    plan = subscriptions.fund_plan(periodic, pool, buffer_cfg, horizon_months=horizon_cfg)
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Odkładaj miesięcznie", fmt2(per_sum["monthly"]),
-              help="Suma rat: kwota podzielona przez długość cyklu (np. OC 1200 zł rocznie = 100 zł miesięcznie).")
-    p2.metric("Powinno być już odłożone", fmt(per_sum["target_now"]))
-    p3.metric("Wpisane jako odłożone", fmt(per_sum["saved"]))
-    p4.metric("Różnica", f"{per_sum['saved'] - per_sum['target_now']:+,.0f} zł".replace(",", " "),
-              help="Plus: masz więcej niż trzeba, minus: brakuje.")
+    p1.metric("Odłożono na koszty roczne", fmt2(pool),
+              help=f"Stan wpisany dnia {pool_cfg['as_of']}." if pool_cfg.get("as_of") else "Wpisz kwotę w ustawieniach planu.")
+    p2.metric("Powinno być odłożone dziś", fmt(per_sum["target_now"]),
+              help="Ile zgromadziłbyś, odkładając równo od poprzedniej płatności każdego kosztu.")
+    p3.metric("Różnica", f"{pool - per_sum['target_now']:+,.0f} zł".replace(",", " "),
+              help="Plus: masz więcej niż przy równym odkładaniu, minus: brakuje.")
+    p4.metric("Rata miesięczna (średnio)", fmt2(per_sum["monthly"]),
+              help="Suma rat: kwota podzielona przez długość cyklu (np. OC 1200 zł rocznie = 100 zł miesięcznie). "
+                   "To docelowa średnia, gdy fundusz jest już zasilony.")
+    q1, q2, q3 = st.columns(3)
+    q1.metric(f"Odkładaj miesięcznie (plan na {horizon_cfg} mies.)", fmt2(plan["monthly"]),
+              help="Najniższa stała wpłata miesięczna, przy której w dniu każdej płatności z najbliższych miesięcy "
+                   "wystarczy środków (odłożone + wpłaty) na pokrycie wszystkich płatności do tego dnia plus zapas.")
+    q2.metric(f"Do zapłacenia w {horizon_cfg} mies.", fmt(plan["total_due"]))
+    q3.metric("Pokrycie z odłożonych", f"{min(100.0, pool / plan['total_due'] * 100):.0f}%" if plan["total_due"] else "-")
+    if plan["binding"] is not None:
+        bd = plan["binding"]
+        st.caption(f"Najtrudniejszy termin: {bd['date']:%Y-%m-%d} ({bd['name']}): do tego dnia trzeba mieć na płatności "
+                   f"łącznie {fmt(bd['cum'])}. Wyliczenie zakłada równe wpłaty co miesiąc od dziś, a najbliższy termin "
+                   "liczy najwyżej jako 1 miesiąc. Wpłata jest wyższa niż średnia rata, gdy płatności wypadają blisko "
+                   "siebie albo odłożono mało.")
+    elif plan["total_due"]:
+        st.success("Odłożona kwota wystarcza na wszystkie płatności w wybranym okresie, bez dalszych wpłat.")
 
     with st.form("add_periodic", clear_on_submit=True):
-        q1, q2 = st.columns(2)
-        pr_name = q1.text_input("Nazwa (np. OC samochodu)")
-        pr_amount = q2.number_input("Kwota jednej płatności (zł)", min_value=0.0, step=10.0, format="%.2f")
-        q3, q4, q5 = st.columns(3)
-        pr_cycle = q3.selectbox("Jak często", pcyc_labels, index=pcyc_labels.index("rocznie"))
-        pr_next = q4.date_input("Najbliższy termin płatności", value=None,
-                                help="Bez daty program nie policzy, ile odłożyć do terminu.")
-        pr_saved = q5.number_input("Już odłożono (zł)", min_value=0.0, step=10.0, format="%.2f")
+        q1_, q2_ = st.columns(2)
+        pr_name = q1_.text_input("Nazwa (np. OC samochodu)")
+        pr_amount = q2_.number_input("Kwota jednej płatności (zł)", min_value=0.0, step=10.0, format="%.2f")
+        q3_, q4_ = st.columns(2)
+        pr_cycle = q3_.selectbox("Jak często", pcyc_labels, index=pcyc_labels.index("rocznie"))
+        pr_next = q4_.date_input("Najbliższy termin płatności", value=None,
+                                 help="Bez daty program nie policzy planu. Kolejne terminy liczy sam.")
         pr_note = st.text_input("Notatka (opcjonalnie)")
         if st.form_submit_button("Dodaj koszt"):
             try:
-                subscriptions.add(pr_name, pr_amount, pcyc_by_label[pr_cycle], pr_next, pr_note,
-                                  category="periodic", saved=pr_saved)
+                subscriptions.add(pr_name, pr_amount, pcyc_by_label[pr_cycle], pr_next, pr_note, category="periodic")
                 st.session_state["flash"] = f"Dodano koszt okresowy: {pr_name.strip()}."
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
 
     if not periodic.empty:
-        st.subheader("Plan odkładania")
-        plan = per_table.copy()
+        st.subheader("Harmonogram płatności")
+        sch = plan["schedule"]
+        if sch.empty:
+            st.info("Brak płatności w wybranym okresie (sprawdź, czy koszty mają datę najbliższego terminu).")
+        else:
+            st.dataframe(pd.DataFrame({
+                "Data": sch["date"].dt.strftime("%Y-%m-%d"), "Koszt": sch["name"], "Kwota (zł)": sch["amount"],
+                "Suma płatności do tego dnia (zł)": sch["cum"].round(2),
+                "Dostępne środki (zł)": sch["funds"].round(2), "Po płatności zostanie (zł)": sch["after"].round(2)}),
+                hide_index=True)
+            st.caption("Dostępne środki = odłożone + wpłaty miesięczne do tego dnia. Wiersz z zerem (lub z zapasem) to termin, "
+                       "który wyznacza wysokość miesięcznej wpłaty.")
+
+        st.subheader("Rozkład na poszczególne koszty")
+        plan_t = per_table.copy()
         st.dataframe(pd.DataFrame({
-            "Koszt": plan["name"], "Termin": plan["next_due"].dt.strftime("%Y-%m-%d"), "Dni do terminu": plan["days_left"],
-            "Kwota (zł)": plan["amount"], "Odłożono (zł)": plan["saved"],
-            "Powinno być (zł)": plan["target_now"].round(2), "Różnica (zł)": plan["diff"].round(2),
-            "Rata miesięczna (zł)": plan["monthly"].round(2), "Odkładaj do terminu (zł/mies.)": plan["to_goal"].round(2)}),
-            hide_index=True)
-        st.caption("„Rata miesięczna” to kwota podzielona przez długość cyklu. „Odkładaj do terminu” to brakująca kwota "
-                   "podzielona przez liczbę miesięcy do terminu (gdy już coś odłożono lub termin jest blisko, jest inna "
-                   "niż rata).")
+            "Koszt": plan_t["name"], "Następny termin": plan_t["next_due"].dt.strftime("%Y-%m-%d"),
+            "Dni do terminu": plan_t["days_left"], "Kwota (zł)": plan_t["amount"],
+            "Rata miesięczna (zł)": plan_t["monthly"].round(2),
+            "Miesięcznie do terminu (zł)": plan_t["to_due"].round(2),
+            "Powinno być odłożone dziś (zł)": plan_t["target_now"].round(2)}), hide_index=True)
+        st.caption("„Rata miesięczna” to kwota podzielona przez długość cyklu. „Miesięcznie do terminu” to kwota podzielona "
+                   "przez liczbę miesięcy do terminu, gdyby odkładać osobno na ten koszt od zera. Plan wspólny powyżej "
+                   "jest łagodniejszy, bo uwzględnia to, co już odłożono, i wspólny fundusz.")
 
         st.subheader("Lista")
         full = subscriptions.periodic_table(periodic.assign(active=True)).set_index("id")
@@ -548,7 +600,7 @@ with t_periodic:
             "Usuń": False, "Aktywna": periodic["active"], "Nazwa": periodic["name"], "Kwota (zł)": periodic["amount"],
             "Jak często": periodic["cycle"].map(subscriptions.CYCLES),
             "Następny termin": periodic["next_date"].apply(lambda d: d.date() if pd.notna(d) else None),
-            "Odłożono (zł)": periodic["saved"], "Notatka": periodic["note"].fillna(""),
+            "Notatka": periodic["note"].fillna(""),
             "Na miesiąc (zł)": [round(full.loc[i, "monthly"], 2) for i in periodic["id"]],
             "Dni do terminu": [full.loc[i, "days_left"] for i in periodic["id"]]})
         pedit = st.data_editor(
@@ -557,13 +609,12 @@ with t_periodic:
                 "Usuń": st.column_config.CheckboxColumn("Usuń"), "Aktywna": st.column_config.CheckboxColumn("Aktywna"),
                 "Kwota (zł)": st.column_config.NumberColumn("Kwota (zł)", min_value=0.0, step=1.0, format="%.2f"),
                 "Jak często": st.column_config.SelectboxColumn("Jak często", options=pcyc_labels, required=True),
-                "Następny termin": st.column_config.DateColumn("Następny termin"),
-                "Odłożono (zł)": st.column_config.NumberColumn("Odłożono (zł)", min_value=0.0, step=1.0, format="%.2f")})
-        st.caption("Po wykonaniu płatności zmień „Następny termin” na kolejny i wyzeruj „Odłożono”. "
+                "Następny termin": st.column_config.DateColumn("Następny termin")})
+        st.caption("Po płatności nie trzeba zmieniać daty: kolejne terminy program liczy sam od podanej daty co cykl. "
                    "Odznacz „Aktywna”, żeby wstrzymać koszt bez usuwania.")
         if st.button("Zapisz zmiany", key="save_periodic"):
             errors, changed = [], 0
-            cols = ["Aktywna", "Nazwa", "Kwota (zł)", "Jak często", "Następny termin", "Odłożono (zł)", "Notatka"]
+            cols = ["Aktywna", "Nazwa", "Kwota (zł)", "Jak często", "Następny termin", "Notatka"]
             for sid, (_, old), new in zip(periodic["id"], ptable.iterrows(), pedit.to_dict("records")):
                 if new["Usuń"]:
                     subscriptions.delete(int(sid))
@@ -574,7 +625,7 @@ with t_periodic:
                 try:
                     subscriptions.update(int(sid), name=new["Nazwa"], amount=new["Kwota (zł)"],
                                          cycle=pcyc_by_label[new["Jak często"]], next_date=new["Następny termin"],
-                                         active=new["Aktywna"], saved=new["Odłożono (zł)"], note=new["Notatka"])
+                                         active=new["Aktywna"], note=new["Notatka"])
                     changed += 1
                 except ValueError as e:
                     errors.append(f"{new['Nazwa'] or '(bez nazwy)'}: {e}")

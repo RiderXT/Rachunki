@@ -149,10 +149,14 @@ okresowe pojawiają się od miesiąca ich dodania.
 ## Koszty roczne i okresowe
 
 Zakładka „Koszty roczne”: OC, przegląd, ubezpieczenia, podatki, opony itp. (co kwartał, pół roku, rok, 2 lub 3 lata).
-Dla każdego kosztu podajesz kwotę, częstotliwość, najbliższy termin i opcjonalnie, ile już odłożono. Program liczy:
-**ratę miesięczną** (kwota ÷ długość cyklu, to jest ile odkładać na stałe), **ile powinno być odłożone dziś** (przy równym
-odkładaniu od poprzedniej płatności), różnicę względem wpisanego oraz **ile odkładać do terminu**. Po płatności zmień termin
-na kolejny i wyzeruj „Odłożono”. Raty wchodzą do sumy „Stałe wydatki” w „Statystykach” i „Subskrypcjach”.
+Dla każdego kosztu podajesz kwotę, częstotliwość i najbliższy termin; kolejne terminy program liczy sam od podanej daty
+co cykl, więc po płatności nic nie trzeba zmieniać. **Wspólną kwotę, którą już odłożyłeś** na takie wydatki, wpisujesz
+raz w „Ustawieniach planu” (razem z minimalnym zapasem i horyzontem planu: 6 do 36 miesięcy). Na tej podstawie program
+sprawdza **każdy termin płatności** w horyzoncie i wylicza **najniższą stałą wpłatę miesięczną**, przy której w dniu
+każdej płatności wystarczy środków (odłożone + wpłaty) na pokrycie wszystkich płatności do tego dnia plus zapas.
+Pokazuje też harmonogram płatności (ile będzie środków i ile zostanie po każdej), rozkład na poszczególne koszty
+(rata miesięczna = kwota ÷ długość cyklu, miesięcznie do terminu, ile powinno być odłożone dziś przy równym
+odkładaniu) oraz średnią ratę docelową. Raty wchodzą do sumy „Stałe wydatki” w „Statystykach” i „Subskrypcjach”.
 
 ## Subskrypcje
 

@@ -117,28 +117,68 @@ def occurrence_in_month(base, cycle, month):
     return base + pd.DateOffset(months=diff)     # od daty wzorcowej: dzień jest przycinany do długości miesiąca
 
 
+DAYS_PER_MONTH = 30.4375
+
+
 def periodic_table(df, today=None):
-    """Koszty okresowe: rata miesięczna, termin, ile powinno być już odłożone, ile jest, ile odkładać do terminu."""
+    """Koszty okresowe: rata miesięczna, najbliższy termin, miesiące do terminu, kwota na miesiąc do tego terminu
+    (gdyby odkładać osobno na ten koszt od zera) oraz ile powinno być już odłożone przy równym odkładaniu."""
     today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
     rows = []
     for r in df[df["active"]].itertuples():
         step = MONTHS_PER_CYCLE[r.cycle]
         due = next_due(r.next_date, r.cycle, today)
         row = {"id": r.id, "name": r.name, "amount": r.amount, "cycle": r.cycle, "monthly": r.amount / step,
-               "saved": r.saved, "next_due": due, "days_left": None, "target_now": None, "diff": None, "to_goal": None}
+               "next_due": due, "days_left": None, "months_left": None, "to_due": None, "target_now": None}
         if due is not None:
             days_left = (due - today).days
-            months_left = max(1, -(-days_left // 30.4375)) if days_left > 0 else 1
-            elapsed = min(1.0, max(0.0, 1 - days_left / (step * 30.4375)))
-            row.update(days_left=days_left, target_now=r.amount * elapsed, diff=r.saved - r.amount * elapsed,
-                       to_goal=max(0.0, r.amount - r.saved) / months_left)
+            months_left = max(1, -(-days_left // DAYS_PER_MONTH)) if days_left > 0 else 1
+            elapsed = min(1.0, max(0.0, 1 - days_left / (step * DAYS_PER_MONTH)))
+            row.update(days_left=days_left, months_left=months_left, to_due=r.amount / months_left,
+                       target_now=r.amount * elapsed)
         rows.append(row)
-    cols = ["id", "name", "amount", "cycle", "monthly", "saved", "next_due", "days_left", "target_now", "diff", "to_goal"]
+    cols = ["id", "name", "amount", "cycle", "monthly", "next_due", "days_left", "months_left", "to_due", "target_now"]
     return pd.DataFrame(rows, columns=cols).sort_values("next_due", na_position="last").reset_index(drop=True)
 
 
 def periodic_summary(table):
-    """Sumy: rata miesięczna, ile powinno być odłożone dziś, ile wpisano jako odłożone, ile odkładać do terminów."""
-    t = table
-    return {"monthly": float(t["monthly"].sum()), "target_now": float(t["target_now"].fillna(0).sum()),
-            "saved": float(t["saved"].sum()), "to_goal": float(t["to_goal"].fillna(0).sum()), "count": len(t)}
+    """Sumy: rata miesięczna (średnio) i ile powinno być odłożone dziś przy równym odkładaniu."""
+    return {"monthly": float(table["monthly"].sum()), "target_now": float(table["target_now"].fillna(0).sum()),
+            "count": len(table)}
+
+
+def occurrences(df, today=None, horizon_months=12):
+    """Wszystkie płatności aktywnych kosztów okresowych w oknie [dziś, dziś + horyzont]: (date, name, amount)."""
+    today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
+    end = today + pd.DateOffset(months=int(horizon_months))
+    rows = []
+    for r in df[df["active"]].itertuples():
+        if r.next_date is None or pd.isna(r.next_date):
+            continue
+        base, step = pd.Timestamp(r.next_date).normalize(), MONTHS_PER_CYCLE[r.cycle]
+        k = 0
+        while base + pd.DateOffset(months=k) < today:           # pierwsza płatność dziś lub później
+            k += step
+        while base + pd.DateOffset(months=k) <= end:
+            rows.append({"date": base + pd.DateOffset(months=k), "name": r.name, "amount": float(r.amount)})
+            k += step
+    return pd.DataFrame(rows, columns=["date", "name", "amount"]).sort_values(["date", "name"]).reset_index(drop=True)
+
+
+def fund_plan(df, pool=0.0, buffer=0.0, today=None, horizon_months=12):
+    """Plan wspólnego funduszu na koszty okresowe. Zakłada równe wpłaty co miesiąc od dziś i sprawdza każdy termin:
+    środki dostępne w dniu płatności (odłożone + wpłaty) muszą pokryć sumę wszystkich płatności do tego dnia plus zapas.
+    Zwraca najniższą taką wpłatę miesięczną i harmonogram płatności (najbliższy termin liczony min. 1 miesiąc)."""
+    today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
+    occ = occurrences(df, today, horizon_months)
+    pool, buffer = float(pool or 0.0), float(buffer or 0.0)
+    if occ.empty:
+        return {"monthly": 0.0, "total_due": 0.0, "schedule": occ.assign(t=[], cum=[], funds=[], after=[]), "binding": None}
+    occ["t"] = ((occ["date"] - today).dt.days / DAYS_PER_MONTH).clip(lower=1.0)      # miesiące od dziś (min. 1)
+    occ["cum"] = occ["amount"].cumsum()
+    needs = (occ["cum"] + buffer - pool) / occ["t"]
+    monthly = max(0.0, float(needs.max()))
+    occ["funds"] = pool + monthly * occ["t"]
+    occ["after"] = occ["funds"] - occ["cum"]
+    return {"monthly": monthly, "total_due": float(occ["amount"].sum()), "schedule": occ,
+            "binding": occ.loc[needs.idxmax()] if monthly > 0 else None}
