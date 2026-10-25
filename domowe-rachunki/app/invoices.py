@@ -212,7 +212,14 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     if "--reparse" in sys.argv:
         util = next((a for a in sys.argv[sys.argv.index("--reparse") + 1:] if a in PARSERS), None)
-        reparse_all(util, progress=lambda i, n, r: print(f"[{i}/{n}] {r['Dostawca']} {r['Numer']} | {r['Wynik']}", flush=True))
+        rows = reparse_all(util, progress=lambda i, n, r: print(
+            f"[{i}/{n}] {r['Dostawca']} {r['Numer']} | {r['Kwota'] or '?'} zł, {r['Zużycie'] or 'zużycie ?'} | {r['Wynik']}", flush=True))
+        total = len(rows)
+        zbiorcze = sum("podział zbiorczy" in r["Wynik"] for r in rows)
+        brak = sum(("BRAK" in r["Wynik"] or "POMINIĘTO" in r["Wynik"] or "nie udało" in r["Wynik"] or "brak pliku" in r["Wynik"]) for r in rows)
+        bez_zuzycia = sum(not r["Zużycie"] for r in rows)
+        print(f"\nPodsumowanie: {total} faktur | pełne pozycje: {total - zbiorcze - brak} | podział zbiorczy: {zbiorcze} | "
+              f"bez pozycji lub błąd: {brak} | bez odczytanego zużycia: {bez_zuzycia}")
     else:
         print(main.__doc__)
 

@@ -269,6 +269,10 @@ def utility_tab(utility, noun, owner, price_title, empty_msg):
         f1.metric("Opłaty stałe (miesięczne)", fmt(fixed))
         f2.metric("Opłaty zależne od zużycia", fmt(variable))
         st.caption("Kwoty brutto, rozłożone na dni okresów rozliczeniowych poszczególnych pozycji.")
+        if "dystrybucja" in struct.index and struct.loc["dystrybucja", "cost"] > 0:
+            st.info("Część faktur z tego okresu ma tylko podział zbiorczy (energia i dystrybucja razem). Wiersz "
+                    "„Dystrybucja (razem)” nie jest wliczony do opłat stałych ani zależnych od zużycia, więc te dwie sumy "
+                    "dotyczą wyłącznie faktur ze szczegółowymi pozycjami.")
     if not prices_var.empty:
         st.subheader("Ceny za kWh, brutto (zł)")
         if len(prices_var) > 1:
