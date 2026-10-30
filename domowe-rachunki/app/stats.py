@@ -469,7 +469,7 @@ DAYS_PER_MONTH = 30.4375
 
 
 def fuel_window(cfg=None, today=None):
-    """(początek, koniec) okna statystyk paliwa wg ustawienia. Tryby: months (n ostatnich pełnych miesięcy),
+    """(początek, koniec) okna statystyk paliwa wg ustawienia. Tryby: months (n ostatnich miesięcy do dziś),
     days (n ostatnich dni), since (od daty do dziś), year (rok kalendarzowy)."""
     cfg = cfg or DEFAULT_FUEL_CFG
     today = (pd.Timestamp(today) if today is not None else pd.Timestamp.today()).normalize()
@@ -481,8 +481,8 @@ def fuel_window(cfg=None, today=None):
     if mode == "year" and cfg.get("year"):
         y = int(cfg["year"])
         return pd.Timestamp(y, 1, 1), min(pd.Timestamp(y, 12, 31), today)
-    n = max(1, int(cfg.get("n", 12)))
-    return (today.to_period("M") - n).start_time, (today.to_period("M") - 1).end_time.normalize()
+    n = max(1, int(cfg.get("n", 12)))          # okno kroczące: n miesięcy wstecz do dziś (z bieżącym miesiącem)
+    return (today - pd.DateOffset(months=n) + pd.Timedelta(days=1)).normalize(), today
 
 
 def fuel_window_label(cfg=None):

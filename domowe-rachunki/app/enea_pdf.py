@@ -55,7 +55,9 @@ def parse_items(text):
                           "unit_price": w._num(row["price"]), "vat_rate": vat, "amount_net": net,
                           "amount_gross": round(net * (1 + vat / 100), 2),
                           "period_start": period[0], "period_end": period[1]})
-            name = None
+            # nazwa zostaje: pod jedną pozycją bywa kilka wierszy (np. energia w okresie ze zmianą ceny)
+        elif not row and re.match(r"(?i)(og[óo][łl]em\s+warto|rozliczenie\s*-)", line):
+            name = None                                    # koniec sekcji: kolejne wiersze nie należą do poprzedniej nazwy
         elif not row and _kind(line):
             name = line
     return items

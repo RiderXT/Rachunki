@@ -129,8 +129,8 @@ Dla każdego maila pokaże datę, temat, liczbę załączników PDF, to, co odcz
 jest już w bazie. Jeśli `FUEL_SENDER` dopisano do `.env` po uruchomieniu usługi, odtwórz kontener, bo zmienne są
 czytane tylko przy jego tworzeniu: `docker compose up -d --force-recreate water-sync`. Dane można brać z samej
 treści maila albo z samego PDF-a, więc zmiana wyglądu maila przez ORLEN nie blokuje importu, o ile jest załącznik.
-**Okres statystyk** wybierasz w zakładce „Paliwo”: ostatni miesiąc, 2, 3, 6, 12 miesięcy, ostatnie 30 dni, rok albo „od
-wybranej daty”. Wybór jest zapamiętywany i określa też średnią paliwa w „Statystykach” oraz „Subskrypcjach”. Średnia
+**Okres statystyk** wybierasz w zakładce „Paliwo”: ostatni miesiąc, 2, 3, 6, 12 miesięcy (okno kroczące do dziś, więc
+z bieżącym miesiącem), ostatnie 30 dni, rok albo „od wybranej daty”. Wybór jest zapamiętywany i określa też średnią paliwa w „Statystykach” oraz „Subskrypcjach”. Średnia
 miesięczna to koszt ÷ liczba dni okna × 30,44, a okno jest skracane do daty pierwszego zakupu. **Ręczne tankowanie**
 (płatność przy kasie, bez faktury): data, litry i cena za litr (kwota = litry × cena, albo wpisz kwotę z paragonu).
 Paliwo jest w statystykach osobno: „Odkładaj miesięcznie” dotyczy tylko mediów (prąd, gaz, woda).
